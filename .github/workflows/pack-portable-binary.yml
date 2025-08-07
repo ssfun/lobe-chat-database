@@ -39,30 +39,11 @@ jobs:
         run: |
           ./dockerc --image docker://sfun/lobe-chat:${{ env.LATEST_TAG }} --arch arm64 --output lobe-chat-${{ env.LATEST_TAG }}-linux-arm64.bin
 
-      - name: Create GitHub Release
-        id: create_release
+      - name: Upload all bins to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.LATEST_TAG }}
-          name: sfun/lobe-chat ${{ env.LATEST_TAG }}
-          body: |
-            Auto built by GitHub Actions.
-            Origin image: sfun/lobe-chat:${{ env.LATEST_TAG }}.
-            Includes linux/amd64 and linux/arm64 portable binaries.
-          draft: false
-          prerelease: false
-          token: ${{ secrets.GH_TOKEN }}
-
-      - name: Upload amd64 Bin to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.LATEST_TAG }}
-          files: lobe-chat-${{ env.LATEST_TAG }}-linux-amd64.bin
-          token: ${{ secrets.GH_TOKEN }}
-
-      - name: Upload arm64 Bin to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.LATEST_TAG }}
-          files: lobe-chat-${{ env.LATEST_TAG }}-linux-arm64.bin
-          token: ${{ secrets.GH_TOKEN }}
+          files: |
+            lobe-chat-${{ env.LATEST_TAG }}-linux-amd64.bin
+            lobe-chat-${{ env.LATEST_TAG }}-linux-arm64.bin
+          token: ${{ secrets.GITHUB_TOKEN }}
