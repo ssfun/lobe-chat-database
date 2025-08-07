@@ -2,6 +2,8 @@ name: Pack & Release Portable Binary
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '15 1 * * *'  # Asia/Shanghai 时间10点（UTC 时间1:00）
 
 permissions:
   contents: write
