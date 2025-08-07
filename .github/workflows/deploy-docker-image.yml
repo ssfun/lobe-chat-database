@@ -67,7 +67,7 @@ jobs:
         if: steps.compare_versions.outputs.should_build == 'true'
         uses: docker/build-push-action@v4
         with:
-          context: ./lobechat  # 指定构建上下文为 /lobechat 目录
+          context: . 
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
