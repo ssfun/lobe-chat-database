@@ -1,0 +1,59 @@
+name: Pack & Release Portable Binary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pack-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get latest sfun/lobe-chat tag
+        id: get_tag
+        run: |
+          LATEST_TAG=$(curl -s https://registry.hub.docker.com/v2/repositories/sfun/lobe-chat/tags?page_size=1\&ordering=last_updated | jq -r '.results[0].name')
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up dependencies for dockerc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse overlayroot squashfs-tools skopeo jq curl
+
+      - name: Download dockerc
+        run: |
+          wget -O dockerc https://github.com/NilsIrl/dockerc/releases/download/v0.3.2/dockerc_x86-64
+          chmod +x ./dockerc
+
+      - name: Pack sfun/lobe-chat:${{ env.LATEST_TAG }} for linux/amd64
+        run: |
+          ./dockerc --image docker://sfun/lobe-chat:${{ env.LATEST_TAG }} --arch amd64 --output lobe-chat-${{ env.LATEST_TAG }}-linux-amd64.bin
+
+      - name: Pack sfun/lobe-chat:${{ env.LATEST_TAG }} for linux/arm64
+        run: |
+          ./dockerc --image docker://sfun/lobe-chat:${{ env.LATEST_TAG }} --arch arm64 --output lobe-chat-${{ env.LATEST_TAG }}-linux-arm64.bin
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.LATEST_TAG }}
+          name: sfun/lobe-chat ${{ env.LATEST_TAG }}
+          body: "Auto built by GitHub Actions. Origin image: sfun/lobe-chat:${{ env.LATEST_TAG }}. Includes linux/amd64 and linux/arm64 binaries."
+          draft: false
+          prerelease: false
+
+      - name: Upload amd64 Bin to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.LATEST_TAG }}
+          files: lobe-chat-${{ env.LATEST_TAG }}-linux-amd64.bin
+
+      - name: Upload arm64 Bin to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.LATEST_TAG }}
+          files: lobe-chat-${{ env.LATEST_TAG }}-linux-arm64.bin
