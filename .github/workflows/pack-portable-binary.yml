@@ -38,7 +38,7 @@ jobs:
         id: version_check
         run: |
           # 移除可能的 'v' 前缀以进行版本比较
-          DOCKER_VERSION="${DOCKER_TAG#v}"
+          DOCKER_VERSION="${LATEST_TAG#v}"
           GITHUB_VERSION="${GITHUB_TAG#v}"
           
           echo "Comparing versions:"
