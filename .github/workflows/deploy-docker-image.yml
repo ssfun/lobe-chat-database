@@ -26,8 +26,8 @@ jobs:
           # 获取所有标签，过滤掉 latest 和非版本标签
           echo "Fetching Docker Hub tags..."
           
-          # 获取前100个标签（通常足够找到最新版本）
-          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=100')
+          # 获取前10个标签（通常足够找到最新版本）
+          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=10')
           
           # 提取所有标签名，过滤出版本号格式的标签（v开头或纯数字版本）
           # 排除 latest, nightly, dev 等非版本标签
