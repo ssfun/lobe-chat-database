@@ -23,7 +23,7 @@ jobs:
       - name: Get latest lobehub/lobe-chat-database docker tag
         id: get_docker_tag
         run: |
-          LATEST_TAG=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=1&ordering=last_updated' | jq -r '.results[0].name')
+          LATEST_TAG=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=2&ordering=last_updated' | jq -r '.results[0].name')
           echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
           echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           echo "Docker latest tag: $LATEST_TAG"
