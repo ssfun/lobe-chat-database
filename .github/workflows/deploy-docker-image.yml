@@ -1,100 +1,226 @@
-name: Publish Lobe-chat Docker Image
+name: Pack & Release Portable Binary
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '5 1 * * *'  # Asia/Shanghai 时间10点（UTC 时间1:00）
+    - cron: '15 1 * * *' 
+
+permissions:
+  contents: write
 
 jobs:
-  build-and-push:
+  pack-and-release:
+    runs-on: ubuntu-latest
+    outputs:
+      should_pack: ${{ steps.version_check.outputs.should_pack }}
+      github_tag: ${{ steps.get_github_tag.outputs.tag }}
+      docker_tag: ${{ steps.get_docker_tag.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get latest lobehub/lobe-chat-database docker tag
+        id: get_docker_tag
+        run: |
+          # 获取所有标签，过滤掉 latest 和非版本标签
+          echo "Fetching Docker Hub tags..."
+          
+          # 获取前100个标签（通常足够找到最新版本）
+          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=100')
+          
+          # 提取所有标签名，过滤出版本号格式的标签（v开头或纯数字版本）
+          # 排除 latest, nightly, dev 等非版本标签
+          LATEST_VERSION=$(echo "$TAGS_JSON" | jq -r '.results[].name' | \
+            grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.\-]+)?$' | \
+            grep -v -E '^(latest|nightly|dev|alpha|beta|rc)$' | \
+            sort -rV | \
+            head -n1)
+          
+          # 如果没有找到版本标签，尝试其他模式
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "No semantic version found, trying alternative patterns..."
+            LATEST_VERSION=$(echo "$TAGS_JSON" | jq -r '.results[].name' | \
+              grep -E '^[0-9]+\.[0-9]+' | \
+              grep -v -E '^(latest|nightly|dev)$' | \
+              sort -rV | \
+              head -n1)
+          fi
+          
+          # 确保找到了有效的版本
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "ERROR: No valid version tag found in Docker Hub"
+            exit 1
+          fi
+          
+          echo "LATEST_TAG=$LATEST_VERSION" >> $GITHUB_ENV
+          echo "tag=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Docker latest version tag: $LATEST_VERSION"
+
+      - name: Get latest ssfun/lobe-chat-database GitHub release tag
+        id: get_github_tag
+        run: |
+          # 尝试获取最新的 release
+          RESPONSE=$(curl -s -w "\n%{http_code}" 'https://api.github.com/repos/ssfun/lobe-chat-database/releases/latest')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "No releases found in GitHub repository"
+            GITHUB_TAG="v0.0.0"
+            echo "Using default version: $GITHUB_TAG"
+          elif [ "$HTTP_CODE" = "200" ]; then
+            GITHUB_TAG=$(echo "$BODY" | jq -r '.tag_name')
+            if [ "$GITHUB_TAG" = "null" ] || [ -z "$GITHUB_TAG" ]; then
+              echo "No valid tag found in latest release"
+              GITHUB_TAG="v0.0.0"
+              echo "Using default version: $GITHUB_TAG"
+            else
+              echo "Found GitHub release tag: $GITHUB_TAG"
+            fi
+          else
+            echo "Failed to fetch GitHub releases. HTTP Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            # 尝试获取所有标签作为备选方案
+            echo "Trying to fetch tags instead..."
+            GITHUB_TAG=$(curl -s 'https://api.github.com/repos/ssfun/lobe-chat-database/tags' | \
+              jq -r '.[].name' | \
+              grep -E '^v?[0-9]+\.[0-9]+' | \
+              sort -rV | \
+              head -n1)
+            
+            if [ -z "$GITHUB_TAG" ]; then
+              GITHUB_TAG="v0.0.0"
+              echo "No tags found, using default: $GITHUB_TAG"
+            else
+              echo "Found GitHub tag: $GITHUB_TAG"
+            fi
+          fi
+          
+          echo "GITHUB_TAG=$GITHUB_TAG" >> $GITHUB_ENV
+          echo "tag=$GITHUB_TAG" >> $GITHUB_OUTPUT
+          echo "GitHub latest tag: $GITHUB_TAG"
+
+      - name: Compare versions and decide if packing is needed
+        id: version_check
+        run: |
+          # 标准化版本号格式（移除 v 前缀）
+          DOCKER_VERSION="${LATEST_TAG#v}"
+          GITHUB_VERSION="${GITHUB_TAG#v}"
+          
+          echo "Comparing versions:"
+          echo "Docker version: $DOCKER_VERSION"
+          echo "GitHub version: $GITHUB_VERSION"
+          
+          # 版本比较函数
+          version_gt() {
+            # 使用 sort -V 进行版本比较
+            # 如果第一个版本大于第二个版本，返回 0（true）
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$1" ]
+          }
+          
+          # 检查版本是否相同
+          if [ "$DOCKER_VERSION" = "$GITHUB_VERSION" ]; then
+            echo "Versions are identical, no need to pack"
+            echo "should_pack=false" >> $GITHUB_OUTPUT
+          elif version_gt "$DOCKER_VERSION" "$GITHUB_VERSION"; then
+            echo "Docker version ($DOCKER_VERSION) is newer than GitHub version ($GITHUB_VERSION)"
+            echo "should_pack=true" >> $GITHUB_OUTPUT
+          else
+            echo "Docker version ($DOCKER_VERSION) is not newer than GitHub version ($GITHUB_VERSION)"
+            echo "should_pack=false" >> $GITHUB_OUTPUT
+          fi
+          
+          # 输出决策摘要
+          echo "---"
+          echo "Decision summary:"
+          echo "  Docker Hub version: v$DOCKER_VERSION"
+          echo "  GitHub Release version: v$GITHUB_VERSION"
+          echo "  Should pack: $([ "$DOCKER_VERSION" != "$GITHUB_VERSION" ] && version_gt "$DOCKER_VERSION" "$GITHUB_VERSION" && echo "YES" || echo "NO")"
+
+  pack-binaries:
+    needs: pack-and-release
+    if: needs.pack-and-release.outputs.should_pack == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Get latest release tag
-        id: get_latest_tag
+      - name: Set up dependencies for dockerc
         run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/lobehub/lobe-chat/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-          echo "Latest tag: $LATEST_TAG"
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-      
-      - name: Get current Docker image version
-        id: get_current_version
+          sudo apt-get update
+          sudo apt-get install -y fuse overlayroot squashfs-tools skopeo jq curl
+
+      - name: Download dockerc
         run: |
-          # 从 Docker Hub 获取当前镜像的版本号
-          CURRENT_TAG=$(curl -s https://hub.docker.com/v2/repositories/${{ secrets.DOCKER_USERNAME }}/lobe-chat/tags/ | jq -r '.results[] | select(.name != "latest") | .name' | sort -V | tail -n 1)
-          if [ -z "$CURRENT_TAG" ]; then
-            CURRENT_TAG="0.0.0"  # 如果没有找到版本号，默认使用 0.0.0
-          fi
-          echo "Current Docker image version: $CURRENT_TAG"
-          echo "current_tag=$CURRENT_TAG" >> $GITHUB_OUTPUT
+          wget -O dockerc https://github.com/NilsIrl/dockerc/releases/download/v0.3.2/dockerc_x86-64
+          chmod +x ./dockerc
 
-      - name: Compare versions
-        id: compare_versions
+      - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/amd64
         run: |
-          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
-          CURRENT_TAG="${{ steps.get_current_version.outputs.current_tag }}"
+          echo "Packing AMD64 binary for version: ${{ needs.pack-and-release.outputs.docker_tag }}"
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+            --arch amd64 \
+            --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
 
-          # 去掉版本号中的 "v" 前缀
-          LATEST_VERSION=$(echo "$LATEST_TAG" | sed 's/^v//')
-          CURRENT_VERSION=$(echo "$CURRENT_TAG" | sed 's/^v//')
+      - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/arm64
+        run: |
+          echo "Packing ARM64 binary for version: ${{ needs.pack-and-release.outputs.docker_tag }}"
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+            --arch arm64 \
+            --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
 
-          # 使用 sort -V 比较版本号
-          HIGHER_VERSION=$(echo -e "$LATEST_VERSION\n$CURRENT_VERSION" | sort -V | tail -n 1)
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin > checksums.txt
+          sha256sum lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin >> checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
 
-          if [[ "$HIGHER_VERSION" == "$LATEST_VERSION" && "$LATEST_VERSION" != "$CURRENT_VERSION" ]]; then
-            echo "New version available, continuing..."
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "No new version available, stopping..."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Set up Docker Buildx
-        if: steps.compare_versions.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@v2
-
-      - name: Log in to Docker Hub
-        if: steps.compare_versions.outputs.should_build == 'true'
-        uses: docker/login-action@v2
+      - name: Upload all bins to Release
+        uses: softprops/action-gh-release@v2
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and push Docker image
-        if: steps.compare_versions.outputs.should_build == 'true'
-        uses: docker/build-push-action@v4
-        with:
-          context: . 
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/lobe-chat:latest
-            ${{ secrets.DOCKER_USERNAME }}/lobe-chat:${{ steps.get_latest_tag.outputs.latest_tag }}
-
-      - name: Send Telegram notification
-        if: steps.compare_versions.outputs.should_build == 'true'
-        run: |
-          MESSAGE="New lobe-chat image pushed! 🚀%0A%0A"
-          MESSAGE+="Version: ${{ steps.get_latest_tag.outputs.latest_tag }}%0A"
-          MESSAGE+="Image URL: https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/lobe-chat/tags"
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="$MESSAGE"
-
-  cleanup-runs:
-    runs-on: ubuntu-latest
-    needs: build-and-push  # 确保在 build-and-push 任务完成后执行
-    permissions:
-      actions: write  # 需要 write 权限来删除运行日志
-      contents: read  # 需要 read 权限来访问仓库信息
-    steps:
-      - name: Delete old workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ secrets.GH_TOKEN }}  # 使用默认的 GITHUB_TOKEN
-          repository: ${{ github.repository }}  # 当前仓库
-          retain_days: 7  # 保留最近 7 天的运行日志
-          keep_minimum_runs: 6  # 至少保留 6 条运行日志
+          tag_name: ${{ needs.pack-and-release.outputs.docker_tag }}
+          files: |
+            lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
+            checksums.txt
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "Release ${{ needs.pack-and-release.outputs.docker_tag }}"
+          body: |
+            ## 🚀 Automated Release for lobe-chat ${{ needs.pack-and-release.outputs.docker_tag }}
+            
+            ### 📦 Version Information
+            - **Docker image version:** `${{ needs.pack-and-release.outputs.docker_tag }}`
+            - **Previous GitHub release:** `${{ needs.pack-and-release.outputs.github_tag }}`
+            - **Release date:** `${{ github.event.head_commit.timestamp }}`
+            
+            ### 📥 Downloads
+            This release contains portable binary executables packed from the official Docker image.
+            
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64/amd64 | `lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin` |
+            | Linux | arm64/aarch64 | `lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin` |
+            
+            ### 🔒 Verification
+            SHA256 checksums are available in `checksums.txt`
+            
+            ### 📝 Usage
+            ```bash
+            # Download the binary
+            wget https://github.com/ssfun/lobe-chat-database/releases/download/${{ needs.pack-and-release.outputs.docker_tag }}/lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            
+            # Make it executable
+            chmod +x lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            
+            # Run
+            ./lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            ```
+            
+            ### 🐳 Docker Image
+            Original Docker image: `lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }}`
+            
+            ---
+            *This release was automatically generated from the Docker Hub image.*
