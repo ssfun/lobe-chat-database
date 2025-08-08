@@ -1,9 +1,9 @@
-name: Pack & Release Portable Binary
+name: Pack & Release & Deploy Portable Binary
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *'  # Asia/Shanghai 时间10点（UTC 时间1:00）
+    - cron: '15 1 * * *' 
 
 permissions:
   contents: write
@@ -23,15 +23,80 @@ jobs:
       - name: Get latest lobehub/lobe-chat-database docker tag
         id: get_docker_tag
         run: |
-          LATEST_TAG=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=2&ordering=last_updated' | jq -r '.results[0].name')
-          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
-          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-          echo "Docker latest tag: $LATEST_TAG"
+          # 获取所有标签，过滤掉 latest 和非版本标签
+          echo "Fetching Docker Hub tags..."
+          
+          # 获取前10个标签（通常足够找到最新版本）
+          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=10')
+          
+          # 提取所有标签名，过滤出版本号格式的标签（v开头或纯数字版本）
+          # 排除 latest, nightly, dev 等非版本标签
+          LATEST_VERSION=$(echo "$TAGS_JSON" | jq -r '.results[].name' | \
+            grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.\-]+)?$' | \
+            grep -v -E '^(latest|nightly|dev|alpha|beta|rc)$' | \
+            sort -rV | \
+            head -n1)
+          
+          # 如果没有找到版本标签，尝试其他模式
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "No semantic version found, trying alternative patterns..."
+            LATEST_VERSION=$(echo "$TAGS_JSON" | jq -r '.results[].name' | \
+              grep -E '^[0-9]+\.[0-9]+' | \
+              grep -v -E '^(latest|nightly|dev)$' | \
+              sort -rV | \
+              head -n1)
+          fi
+          
+          # 确保找到了有效的版本
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "ERROR: No valid version tag found in Docker Hub"
+            exit 1
+          fi
+          
+          echo "LATEST_TAG=$LATEST_VERSION" >> $GITHUB_ENV
+          echo "tag=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Docker latest version tag: $LATEST_VERSION"
 
       - name: Get latest ssfun/lobe-chat-database GitHub release tag
         id: get_github_tag
         run: |
-          GITHUB_TAG=$(curl -s 'https://api.github.com/repos/ssfun/lobe-chat-database/releases/latest' | jq -r '.tag_name')
+          # 尝试获取最新的 release
+          RESPONSE=$(curl -s -w "\n%{http_code}" 'https://api.github.com/repos/ssfun/lobe-chat-database/releases/latest')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo "No releases found in GitHub repository"
+            GITHUB_TAG="v0.0.0"
+            echo "Using default version: $GITHUB_TAG"
+          elif [ "$HTTP_CODE" = "200" ]; then
+            GITHUB_TAG=$(echo "$BODY" | jq -r '.tag_name')
+            if [ "$GITHUB_TAG" = "null" ] || [ -z "$GITHUB_TAG" ]; then
+              echo "No valid tag found in latest release"
+              GITHUB_TAG="v0.0.0"
+              echo "Using default version: $GITHUB_TAG"
+            else
+              echo "Found GitHub release tag: $GITHUB_TAG"
+            fi
+          else
+            echo "Failed to fetch GitHub releases. HTTP Code: $HTTP_CODE"
+            echo "Response: $BODY"
+            # 尝试获取所有标签作为备选方案
+            echo "Trying to fetch tags instead..."
+            GITHUB_TAG=$(curl -s 'https://api.github.com/repos/ssfun/lobe-chat-database/tags' | \
+              jq -r '.[].name' | \
+              grep -E '^v?[0-9]+\.[0-9]+' | \
+              sort -rV | \
+              head -n1)
+            
+            if [ -z "$GITHUB_TAG" ]; then
+              GITHUB_TAG="v0.0.0"
+              echo "No tags found, using default: $GITHUB_TAG"
+            else
+              echo "Found GitHub tag: $GITHUB_TAG"
+            fi
+          fi
+          
           echo "GITHUB_TAG=$GITHUB_TAG" >> $GITHUB_ENV
           echo "tag=$GITHUB_TAG" >> $GITHUB_OUTPUT
           echo "GitHub latest tag: $GITHUB_TAG"
@@ -39,7 +104,7 @@ jobs:
       - name: Compare versions and decide if packing is needed
         id: version_check
         run: |
-          # 移除可能的 'v' 前缀以进行版本比较
+          # 标准化版本号格式（移除 v 前缀）
           DOCKER_VERSION="${LATEST_TAG#v}"
           GITHUB_VERSION="${GITHUB_TAG#v}"
           
@@ -47,19 +112,39 @@ jobs:
           echo "Docker version: $DOCKER_VERSION"
           echo "GitHub version: $GITHUB_VERSION"
           
-          # 使用 sort -V 进行版本比较
-          if [ "$(printf '%s\n' "$DOCKER_VERSION" "$GITHUB_VERSION" | sort -V | head -n1)" = "$GITHUB_VERSION" ] && [ "$DOCKER_VERSION" != "$GITHUB_VERSION" ]; then
+          # 版本比较函数
+          version_gt() {
+            # 使用 sort -V 进行版本比较
+            # 如果第一个版本大于第二个版本，返回 0（true）
+            [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" != "$1" ]
+          }
+          
+          # 检查版本是否相同
+          if [ "$DOCKER_VERSION" = "$GITHUB_VERSION" ]; then
+            echo "Versions are identical, no need to pack"
+            echo "should_pack=false" >> $GITHUB_OUTPUT
+          elif version_gt "$DOCKER_VERSION" "$GITHUB_VERSION"; then
             echo "Docker version ($DOCKER_VERSION) is newer than GitHub version ($GITHUB_VERSION)"
             echo "should_pack=true" >> $GITHUB_OUTPUT
           else
             echo "Docker version ($DOCKER_VERSION) is not newer than GitHub version ($GITHUB_VERSION)"
             echo "should_pack=false" >> $GITHUB_OUTPUT
           fi
+          
+          # 输出决策摘要
+          echo "---"
+          echo "Decision summary:"
+          echo "  Docker Hub version: v$DOCKER_VERSION"
+          echo "  GitHub Release version: v$GITHUB_VERSION"
+          echo "  Should pack: $([ "$DOCKER_VERSION" != "$GITHUB_VERSION" ] && version_gt "$DOCKER_VERSION" "$GITHUB_VERSION" && echo "YES" || echo "NO")"
 
   pack-binaries:
     needs: pack-and-release
     if: needs.pack-and-release.outputs.should_pack == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.create_release.outputs.release_created }}
+      version_tag: ${{ needs.pack-and-release.outputs.docker_tag }}
 
     steps:
       - name: Checkout code
@@ -77,25 +162,288 @@ jobs:
 
       - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/amd64
         run: |
-          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} --arch amd64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+          echo "Packing AMD64 binary for version: ${{ needs.pack-and-release.outputs.docker_tag }}"
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+            --arch amd64 \
+            --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
 
       - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/arm64
         run: |
-          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} --arch arm64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
+          echo "Packing ARM64 binary for version: ${{ needs.pack-and-release.outputs.docker_tag }}"
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+            --arch arm64 \
+            --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
+
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin > checksums.txt
+          sha256sum lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin >> checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
 
       - name: Upload all bins to Release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.pack-and-release.outputs.docker_tag }}
           files: |
             lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
             lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
+            checksums.txt
           token: ${{ secrets.GITHUB_TOKEN }}
           title: "Release ${{ needs.pack-and-release.outputs.docker_tag }}"
           body: |
-            Automated release for lobe-chat ${{ needs.pack-and-release.outputs.docker_tag }}
+            ## 🚀 Automated Release for lobe-chat ${{ needs.pack-and-release.outputs.docker_tag }}
             
-            Docker image version: ${{ needs.pack-and-release.outputs.docker_tag }}
-            Previous GitHub release: ${{ needs.pack-and-release.outputs.github_tag }}
+            ### 📦 Version Information
+            - **Docker image version:** `${{ needs.pack-and-release.outputs.docker_tag }}`
+            - **Previous GitHub release:** `${{ needs.pack-and-release.outputs.github_tag }}`
+            - **Release date:** `${{ github.event.head_commit.timestamp }}`
             
-            This release contains portable binary executables packed from the Docker image.
+            ### 📥 Downloads
+            This release contains portable binary executables packed from the official Docker image.
+            
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64/amd64 | `lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin` |
+            | Linux | arm64/aarch64 | `lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin` |
+            
+            ### 🔒 Verification
+            SHA256 checksums are available in `checksums.txt`
+            
+            ### 📝 Usage
+            ```bash
+            # Download the binary
+            wget https://github.com/ssfun/lobe-chat-database/releases/download/${{ needs.pack-and-release.outputs.docker_tag }}/lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            
+            # Make it executable
+            chmod +x lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            
+            # Run
+            ./lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            ```
+            
+            ### 🐳 Docker Image
+            Original Docker image: `lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }}`
+            
+            ---
+            *This release was automatically generated from the Docker Hub image.*
+      
+      - name: Set release created output
+        run: echo "release_created=true" >> $GITHUB_OUTPUT
+
+  deploy-to-server:
+    needs: [pack-binaries]
+    if: needs.pack-binaries.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        server: [server1]  # 可以扩展为多个服务器 [server1, server2, server3]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to ${{ matrix.server }}
+        env:
+          SERVER_HOST: ${{ secrets[format('{0}_HOST', matrix.server)] }}
+          SERVER_USER: ${{ secrets[format('{0}_USER', matrix.server)] }}
+          SERVER_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.server)] }}
+          SERVER_PORT: ${{ secrets[format('{0}_PORT', matrix.server)] || '22' }}
+          LOBE_CHAT_ENV: ${{ secrets[format('{0}_LOBE_CHAT_ENV', matrix.server)] || '' }}
+          VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
+        run: |
+          # 安装 sshpass 用于密码登录
+          sudo apt-get update && sudo apt-get install -y sshpass
+          
+          # 创建部署脚本
+          cat > deploy.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          VERSION_TAG="${1}"
+          LOBE_CHAT_ENV="${2}"
+          
+          echo "Starting deployment of lobe-chat version: ${VERSION_TAG}"
+          
+          # 检测系统架构
+          ARCH=$(uname -m)
+          case ${ARCH} in
+              x86_64)
+                  BINARY_ARCH="amd64"
+                  ;;
+              aarch64|arm64)
+                  BINARY_ARCH="arm64"
+                  ;;
+              *)
+                  echo "Unsupported architecture: ${ARCH}"
+                  exit 1
+                  ;;
+          esac
+          
+          echo "Detected architecture: ${ARCH} (${BINARY_ARCH})"
+          
+          # 下载对应架构的二进制文件
+          DOWNLOAD_URL="https://github.com/ssfun/lobe-chat-database/releases/download/${VERSION_TAG}/lobe-chat-${VERSION_TAG}-linux-${BINARY_ARCH}.bin"
+          echo "Downloading from: ${DOWNLOAD_URL}"
+          
+          # 创建临时目录
+          TEMP_DIR=$(mktemp -d)
+          cd ${TEMP_DIR}
+          
+          # 下载二进制文件
+          if ! wget -O lobe-chat.bin "${DOWNLOAD_URL}"; then
+              echo "Failed to download binary"
+              exit 1
+          fi
+          
+          echo "Download completed successfully"
+          
+          # 检查是否有运行中的 lobe-chat 进程
+          OLD_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          
+          if [ ! -z "${OLD_PID}" ]; then
+              echo "Found running lobe-chat process (PID: ${OLD_PID}), stopping it..."
+              kill ${OLD_PID} || true
+              sleep 3
+              # 强制终止如果还在运行
+              kill -9 ${OLD_PID} 2>/dev/null || true
+              echo "Old process stopped"
+          else
+              echo "No running lobe-chat process found"
+          fi
+          
+          # 创建目标目录（如果不存在）
+          if [ ! -d "/opt/lobe-chat" ]; then
+              echo "Creating directory /opt/lobe-chat"
+              sudo mkdir -p /opt/lobe-chat
+          fi
+          
+          # 备份旧版本（如果存在）
+          if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
+              echo "Backing up old version"
+              sudo mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)
+          fi
+          
+          # 移动新版本到目标位置
+          echo "Installing new version"
+          sudo mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
+          
+          # 设置执行权限
+          echo "Setting execute permissions"
+          sudo chmod +x /opt/lobe-chat/lobe-chat.bin
+          
+          # 清理临时目录
+          cd /
+          rm -rf ${TEMP_DIR}
+          
+          # 启动新版本
+          echo "Starting lobe-chat with environment variables..."
+          if [ -z "${LOBE_CHAT_ENV}" ]; then
+              echo "No environment variables provided"
+              nohup /opt/lobe-chat/lobe-chat.bin > /opt/lobe-chat/lobe-chat.log 2>&1 &
+          else
+              echo "Starting with environment: ${LOBE_CHAT_ENV}"
+              nohup /opt/lobe-chat/lobe-chat.bin ${LOBE_CHAT_ENV} > /opt/lobe-chat/lobe-chat.log 2>&1 &
+          fi
+          
+          # 等待进程启动
+          sleep 5
+          
+          # 验证进程是否成功启动
+          NEW_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          if [ ! -z "${NEW_PID}" ]; then
+              echo "lobe-chat started successfully (PID: ${NEW_PID})"
+              echo "Version ${VERSION_TAG} deployed successfully"
+              # 输出最后几行日志
+              echo "Recent logs:"
+              tail -n 20 /opt/lobe-chat/lobe-chat.log || true
+              exit 0
+          else
+              echo "Failed to start lobe-chat"
+              echo "Error logs:"
+              tail -n 50 /opt/lobe-chat/lobe-chat.log || true
+              exit 1
+          fi
+          EOF
+          
+          # 使用 sshpass 执行部署脚本
+          echo "Connecting to server ${SERVER_HOST}:${SERVER_PORT}"
+          
+          # 上传并执行部署脚本
+          sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
+            "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"
+          
+          DEPLOY_STATUS=$?
+          
+          # 保存部署状态
+          if [ ${DEPLOY_STATUS} -eq 0 ]; then
+              echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
+              echo "Deployment to ${matrix.server} completed successfully"
+          else
+              echo "DEPLOYMENT_SUCCESS=false" >> $GITHUB_ENV
+              echo "Deployment to ${matrix.server} failed"
+              exit 1
+          fi
+
+      - name: Send Telegram notification
+        if: env.DEPLOYMENT_SUCCESS == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
+          SERVER_NAME: ${{ matrix.server }}
+        run: |
+          # 只在配置了 Telegram 的情况下发送通知
+          if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
+            # 构建消息内容
+            MESSAGE="🚀 *Lobe Chat Deployment Success*
+            
+            📦 *Version:* \`${VERSION_TAG}\`
+            🖥️ *Server:* ${SERVER_NAME}
+            ⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            ✅ *Status:* Deployed and running
+            
+            🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
+            
+            # 发送 Telegram 消息
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+                \"text\": \"${MESSAGE}\",
+                \"parse_mode\": \"Markdown\",
+                \"disable_web_page_preview\": true
+              }"
+            
+            echo "Telegram notification sent"
+          else
+            echo "Telegram credentials not configured, skipping notification"
+          fi
+
+  # 可选：部署失败时的通知
+  notify-failure:
+    needs: [deploy-to-server]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send failure notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
+            MESSAGE="❌ *Lobe Chat Deployment Failed*
+            
+            ⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            📝 *Workflow:* ${{ github.workflow }}
+            🔗 [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+                \"text\": \"${MESSAGE}\",
+                \"parse_mode\": \"Markdown\"
+              }"
+          fi
