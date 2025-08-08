@@ -20,10 +20,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get latest sfun/lobe-chat docker tag
+      - name: Get latest lobehub/lobe-chat-database docker tag
         id: get_docker_tag
         run: |
-          LATEST_TAG=$(curl -s 'https://registry.hub.docker.com/v2/repositories/sfun/lobe-chat/tags?page_size=1&ordering=last_updated' | jq -r '.results[0].name')
+          LATEST_TAG=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=1&ordering=last_updated' | jq -r '.results[0].name')
           echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
           echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           echo "Docker latest tag: $LATEST_TAG"
@@ -75,13 +75,13 @@ jobs:
           wget -O dockerc https://github.com/NilsIrl/dockerc/releases/download/v0.3.2/dockerc_x86-64
           chmod +x ./dockerc
 
-      - name: Pack sfun/lobe-chat:${{ needs.pack-and-release.outputs.docker_tag }} for linux/amd64
+      - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/amd64
         run: |
-          ./dockerc --image docker://sfun/lobe-chat:${{ needs.pack-and-release.outputs.docker_tag }} --arch amd64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} --arch amd64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
 
-      - name: Pack sfun/lobe-chat:${{ needs.pack-and-release.outputs.docker_tag }} for linux/arm64
+      - name: Pack lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} for linux/arm64
         run: |
-          ./dockerc --image docker://sfun/lobe-chat:${{ needs.pack-and-release.outputs.docker_tag }} --arch arm64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
+          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} --arch arm64 --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
 
       - name: Upload all bins to Release
         uses: softprops/action-gh-release@v2
