@@ -276,6 +276,7 @@ jobs:
         env:
           SERVER_HOST: ${{ secrets[format('{0}_HOST', matrix.server)] }}
           SERVER_USER: ${{ secrets[format('{0}_USER', matrix.server)] }}
+          LOBE_CHAT_ENV: ${{ secrets[format('{0}_LOBE_CHAT_ENV', matrix.server)] }}
         run: |
           # 检查必需的配置是否存在
           if [ -z "${SERVER_HOST}" ] || [ -z "${SERVER_USER}" ]; then
@@ -287,6 +288,15 @@ jobs:
             exit 1
           fi
           echo "Server configuration verified for ${{ matrix.server }}"
+          
+          # 调试：检查环境变量是否存在（隐藏值）
+          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
+            echo "LOBE_CHAT_ENV is configured (length: ${#LOBE_CHAT_ENV} chars)"
+            # 显示前10个字符用于调试
+            echo "LOBE_CHAT_ENV starts with: ${LOBE_CHAT_ENV:0:10}..."
+          else
+            echo "WARNING: LOBE_CHAT_ENV is not configured"
+          fi
 
       - name: Deploy to ${{ matrix.server }}
         env:
@@ -302,19 +312,37 @@ jobs:
           
           echo "Deploying version ${VERSION_TAG} to ${SERVER_HOST}"
           
+          # 调试：显示环境变量传递状态
+          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
+            echo "Environment variables will be passed to deployment script"
+            echo "Total length: ${#LOBE_CHAT_ENV} characters"
+          else
+            echo "No environment variables to pass"
+          fi
+          
           # 创建部署脚本
           cat > deploy.sh << 'EOF'
           #!/bin/bash
           set -e
           
           VERSION_TAG="${1}"
-          LOBE_CHAT_ENV="${2}"
+          shift  # 移除第一个参数
+          LOBE_CHAT_ENV="$@"  # 剩余的所有参数作为环境变量
           
           echo "========================================="
           echo "Starting deployment of lobe-chat"
           echo "Version: ${VERSION_TAG}"
           echo "Time: $(date)"
           echo "========================================="
+          
+          # 调试：显示收到的环境变量
+          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
+              echo "Received environment variables (length: ${#LOBE_CHAT_ENV})"
+              # 显示前50个字符用于调试
+              echo "Environment starts with: ${LOBE_CHAT_ENV:0:50}..."
+          else
+              echo "No environment variables received"
+          fi
           
           # 检测是否为 root 用户或具有 sudo 权限
           SUDO_CMD=""
@@ -463,150 +491,173 @@ jobs:
           ${SUDO_CMD} chmod 666 ${LOG_FILE}
           
           # 构建启动命令
+          echo ""
           echo "Building startup command..."
           
           # 基础命令
           START_CMD="/opt/lobe-chat/lobe-chat.bin"
           
-          # 解析并添加环境变量参数
+          # 处理环境变量
           if [ ! -z "${LOBE_CHAT_ENV}" ]; then
               echo "Processing environment variables..."
               
-              # 将环境变量转换为 -e KEY=VALUE 格式
-              # 支持多种输入格式：
-              # 1. KEY1=value1 KEY2=value2
-              # 2. KEY1=value1\nKEY2=value2
-              # 3. -e KEY1=value1 -e KEY2=value2 (直接使用)
-              
-              # 检查是否已经包含 -e 参数
+              # 直接使用传入的环境变量字符串
+              # 如果已经包含 -e，直接使用；否则添加 -e
               if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
-                  # 已经是正确格式，直接使用
-                  ENV_ARGS="${LOBE_CHAT_ENV}"
+                  # 已经是正确格式
+                  START_CMD="${START_CMD} ${LOBE_CHAT_ENV}"
                   echo "Using pre-formatted environment arguments"
               else
-                  # 需要转换格式
+                  # 需要添加 -e 前缀
+                  # 将环境变量按空格分割，每个添加 -e
                   ENV_ARGS=""
-                  
-                  # 将换行符替换为空格，然后分割处理
-                  NORMALIZED_ENV=$(echo "${LOBE_CHAT_ENV}" | tr '\n' ' ')
-                  
-                  # 使用 while 循环处理每个环境变量
-                  echo "${NORMALIZED_ENV}" | tr ' ' '\n' | while IFS= read -r line; do
-                      # 跳过空行
-                      [ -z "$line" ] && continue
-                      
-                      # 验证格式（必须包含=）
-                      if echo "$line" | grep -q '='; then
-                          # 如果不是以 -e 开头，添加 -e
-                          if ! echo "$line" | grep -q '^\-e '; then
-                              line="-e $line"
-                          fi
-                          ENV_ARGS="${ENV_ARGS} ${line}"
+                  for env_pair in ${LOBE_CHAT_ENV}; do
+                      if [ ! -z "$env_pair" ] && echo "$env_pair" | grep -q '='; then
+                          ENV_ARGS="${ENV_ARGS} -e ${env_pair}"
                       fi
                   done
-                  
-                  # 另一种方法：使用数组处理
-                  ENV_ARGS=""
-                  IFS=' ' read -ra ENV_ARRAY <<< "${NORMALIZED_ENV}"
-                  for env_var in "${ENV_ARRAY[@]}"; do
-                      if [ ! -z "$env_var" ] && echo "$env_var" | grep -q '='; then
-                          ENV_ARGS="${ENV_ARGS} -e ${env_var}"
-                      fi
-                  done
+                  START_CMD="${START_CMD} ${ENV_ARGS}"
+                  echo "Added -e prefix to environment variables"
               fi
               
-              # 构建完整命令
-              START_CMD="${START_CMD} ${ENV_ARGS}"
-              
-              # 显示环境变量数量（隐藏敏感值）
-              ENV_COUNT=$(echo "${ENV_ARGS}" | grep -o '\-e ' | wc -l)
+              # 统计环境变量数量
+              ENV_COUNT=$(echo "${START_CMD}" | grep -o '\-e ' | wc -l)
               echo "Configured ${ENV_COUNT} environment variable(s)"
               
-              # 显示配置的环境变量名（不显示值）
+              # 显示配置的环境变量名（隐藏值）
               echo "Environment variables:"
-              echo "${ENV_ARGS}" | tr ' ' '\n' | grep '^\-e ' | sed 's/-e /  - /' | sed 's/=.*/=***/'
+              echo "${START_CMD}" | tr ' ' '\n' | grep '^\-e ' | sed 's/-e /  - /' | sed 's/=.*/=***/'
           else
               echo "No environment variables configured"
           fi
           
+          # 显示最终命令（隐藏敏感信息）
+          echo ""
+          echo "Final command (values hidden):"
+          echo "${START_CMD}" | sed 's/=[-a-zA-Z0-9\/\.:_@]*/=***/g'
+          echo ""
+          
+          # 创建启动脚本（用于调试和重启）
+          START_SCRIPT="/opt/lobe-chat/start.sh"
+          ${SUDO_CMD} cat > ${START_SCRIPT} << SCRIPT_EOF
+          #!/bin/bash
+          # Auto-generated startup script
+          # Version: ${VERSION_TAG}
+          # Generated: $(date)
+          
+          LOG_FILE="/opt/lobe-chat/lobe-chat.log"
+          
+          # 启动命令
+          ${START_CMD} > \${LOG_FILE} 2>&1 &
+          
+          echo "Started lobe-chat with PID: \$!"
+          SCRIPT_EOF
+          
+          ${SUDO_CMD} chmod +x ${START_SCRIPT}
+          echo "Startup script saved to ${START_SCRIPT}"
+          
           # 启动服务
           echo ""
           echo "Starting lobe-chat service..."
-          echo "Command: nohup ${START_CMD} > ${LOG_FILE} 2>&1 &"
-          echo ""
           
-          # 执行启动命令
-          eval "nohup ${START_CMD} > ${LOG_FILE} 2>&1 &"
+          # 使用 setsid 创建新会话，避免终端问题
+          setsid ${START_CMD} > ${LOG_FILE} 2>&1 &
           
-          echo "Waiting for service to start..."
-          sleep 5
+          echo "Service starting, waiting for initialization..."
+          sleep 8
           
           # 验证进程是否成功启动
           NEW_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
           if [ ! -z "${NEW_PIDS}" ]; then
-              echo "========================================="
-              echo "Deployment successful!"
-              echo "Process PID(s): ${NEW_PIDS}"
-              echo "Version: ${VERSION_TAG}"
-              echo "========================================="
+              # 检查进程是否真的在运行（再等待一下）
+              sleep 2
+              FINAL_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
               
-              # 显示启动日志
-              echo ""
-              echo "Startup logs (last 30 lines):"
-              echo "-----------------------------------------"
-              tail -n 30 ${LOG_FILE} 2>/dev/null || true
-              echo "-----------------------------------------"
-              
-              # 检查是否有错误信息
-              if tail -n 30 ${LOG_FILE} 2>/dev/null | grep -qi "error\|panic\|failed"; then
-                  echo ""
-                  echo "⚠️  WARNING: Detected potential errors in logs"
-                  echo "Please verify the application is running correctly"
+              if [ ! -z "${FINAL_PIDS}" ]; then
+                  echo "========================================="
+                  echo "Deployment successful!"
+                  echo "Process PID(s): ${FINAL_PIDS}"
+                  echo "Version: ${VERSION_TAG}"
+                  echo "========================================="
                   
-                  # 特定错误检查
-                  if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
-                      echo "❌ Missing required environment variables"
-                  fi
-                  if grep -q "bind: address already in use" ${LOG_FILE} 2>/dev/null; then
-                      echo "❌ Port is already in use"
-                  fi
-              else
+                  # 显示启动日志
                   echo ""
-                  echo "✅ No errors detected in startup logs"
+                  echo "Startup logs (last 40 lines):"
+                  echo "-----------------------------------------"
+                  tail -n 40 ${LOG_FILE} 2>/dev/null || true
+                  echo "-----------------------------------------"
+                  
+                  # 检查是否有错误信息
+                  if tail -n 40 ${LOG_FILE} 2>/dev/null | grep -qi "error\|panic\|failed\|abort"; then
+                      echo ""
+                      echo "⚠️  WARNING: Detected potential errors in logs"
+                      echo "Please verify the application is running correctly"
+                      
+                      # 特定错误检查
+                      if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
+                          echo "❌ Missing required environment variables"
+                      fi
+                      if grep -q "tcgetattr" ${LOG_FILE} 2>/dev/null; then
+                          echo "⚠️  Terminal-related warning (this can be ignored in background mode)"
+                      fi
+                      if grep -q "bind: address already in use" ${LOG_FILE} 2>/dev/null; then
+                          echo "❌ Port is already in use"
+                      fi
+                      
+                      # 即使有警告，如果进程还在运行，认为成功
+                      if [ ! -z "$(pgrep -f "/opt/lobe-chat/lobe-chat.bin")" ]; then
+                          echo ""
+                          echo "ℹ️  Process is still running despite warnings"
+                          exit 0
+                      else
+                          exit 1
+                      fi
+                  else
+                      echo ""
+                      echo "✅ No errors detected in startup logs"
+                  fi
+                  
+                  exit 0
+              else
+                  echo "ERROR: Process started but terminated quickly"
               fi
-              
-              exit 0
-          else
-              echo "ERROR: Failed to start lobe-chat"
-              echo ""
-              echo "Error logs (last 50 lines):"
-              echo "-----------------------------------------"
-              tail -n 50 ${LOG_FILE} 2>/dev/null || true
-              echo "-----------------------------------------"
-              
-              # 分析错误原因
-              echo ""
-              echo "Error analysis:"
-              if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
-                  echo "❌ Missing required environment variables"
-                  echo "   Please check your LOBE_CHAT_ENV configuration"
-              fi
-              if grep -q "permission denied" ${LOG_FILE} 2>/dev/null; then
-                  echo "❌ Permission denied error"
-                  echo "   Check file permissions and user privileges"
-              fi
-              if grep -q "no such file or directory" ${LOG_FILE} 2>/dev/null; then
-                  echo "❌ File not found error"
-                  echo "   Check if all required files are present"
-              fi
-              
-              exit 1
           fi
+          
+          # 启动失败
+          echo "ERROR: Failed to start lobe-chat"
+          echo ""
+          echo "Error logs (last 50 lines):"
+          echo "-----------------------------------------"
+          tail -n 50 ${LOG_FILE} 2>/dev/null || true
+          echo "-----------------------------------------"
+          
+          # 分析错误原因
+          echo ""
+          echo "Error analysis:"
+          if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
+              echo "❌ Missing required environment variables"
+              echo "   Please check your LOBE_CHAT_ENV configuration"
+          fi
+          if grep -q "permission denied" ${LOG_FILE} 2>/dev/null; then
+              echo "❌ Permission denied error"
+              echo "   Check file permissions and user privileges"
+          fi
+          if grep -q "no such file or directory" ${LOG_FILE} 2>/dev/null; then
+              echo "❌ File not found error"
+              echo "   Check if all required files are present"
+          fi
+          if grep -q "tcgetattr" ${LOG_FILE} 2>/dev/null; then
+              echo "⚠️  Terminal issue detected"
+              echo "   Try running with different terminal settings"
+          fi
+          
+          exit 1
           EOF
           
-          # 使用 sshpass 执行部署脚本
+          # 使用 sshpass 执行部署脚本，传递环境变量
           echo "::group::Executing deployment on ${SERVER_HOST}"
           
+          # 注意：这里将环境变量作为参数传递给脚本
           if sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
             "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"; then
             echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
