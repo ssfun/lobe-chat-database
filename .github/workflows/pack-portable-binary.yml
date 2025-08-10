@@ -504,25 +504,21 @@ jobs:
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
             echo "Sending Telegram notification..."
             
-            # 构建消息内容
-            MESSAGE="🚀 *Lobe Chat Deployment Success*
-            
-📦 *Version:* \`${VERSION_TAG}\`
-🖥️ *Server:* ${SERVER_NAME}
-⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-✅ *Status:* Deployed and running
-
-🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
+            # 构建消息内容（使用 JSON 格式避免格式问题）
+            MESSAGE=$(cat <<-END
+          {
+            "chat_id": "${TELEGRAM_CHAT_ID}",
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": true,
+            "text": "🚀 *Lobe Chat Deployment Success*\n\n📦 *Version:* \`${VERSION_TAG}\`\n🖥️ *Server:* ${SERVER_NAME}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n✅ *Status:* Deployed and running\n\n🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
+          }
+          END
+          )
             
             # 发送 Telegram 消息
             RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{
-                \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
-                \"text\": \"${MESSAGE}\",
-                \"parse_mode\": \"Markdown\",
-                \"disable_web_page_preview\": true
-              }")
+              -d "${MESSAGE}")
             
             # 检查发送结果
             if echo "$RESPONSE" | grep -q '"ok":true'; then
@@ -559,20 +555,19 @@ jobs:
               FAILED_STAGE="Unknown"
             fi
             
-            MESSAGE="❌ *Lobe Chat Pipeline Failed*
-            
-⚠️ *Failed Stage:* ${FAILED_STAGE}
-⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-📝 *Workflow:* ${{ github.workflow }}
-🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            # 构建消息内容
+            MESSAGE=$(cat <<-END
+          {
+            "chat_id": "${TELEGRAM_CHAT_ID}",
+            "parse_mode": "Markdown",
+            "text": "❌ *Lobe Chat Pipeline Failed*\n\n⚠️ *Failed Stage:* ${FAILED_STAGE}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n📝 *Workflow:* ${{ github.workflow }}\n🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          }
+          END
+          )
             
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "{
-                \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
-                \"text\": \"${MESSAGE}\",
-                \"parse_mode\": \"Markdown\"
-              }"
+              -d "${MESSAGE}"
               
             echo "Failure notification sent"
           fi
