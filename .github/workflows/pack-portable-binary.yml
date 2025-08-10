@@ -3,7 +3,7 @@ name: Pack & Release & Deploy Portable Binary
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *' 
+    - cron: '15 1 * * *'
 
 permissions:
   contents: write
@@ -214,7 +214,7 @@ jobs:
             ### 📝 Usage
             ```bash
             # Download the binary
-            wget https://github.com/ssfun/lobe-chat-database/releases/download/${{ needs.pack-and-release.outputs.docker_tag }}/lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
+            wget [https://github.com/ssfun/lobe-chat-database/releases/download/$](https://github.com/ssfun/lobe-chat-database/releases/download/$){{ needs.pack-and-release.outputs.docker_tag }}/lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
             
             # Make it executable
             chmod +x lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
@@ -228,8 +228,7 @@ jobs:
             
             ---
             *This release was automatically generated from the Docker Hub image.*
-      
-      # 关键修复：正确设置输出变量
+
       - name: Set release output
         id: set_release_output
         if: always()
@@ -249,22 +248,20 @@ jobs:
 
   deploy-to-server:
     needs: [pack-binaries]
-    # 修改条件判断，确保正确触发
     if: |
       always() && 
       needs.pack-binaries.result == 'success' && 
       needs.pack-binaries.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  # 允许部分服务器失败而不影响其他服务器
+      fail-fast: false
       matrix:
-        server: [server1]  # 可以扩展为多个服务器 [server1, server2, server3]
-    
+        server: [server1]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      # 添加调试信息
       - name: Debug deployment trigger
         run: |
           echo "::notice ::Starting deployment to ${{ matrix.server }}"
@@ -288,15 +285,6 @@ jobs:
             exit 1
           fi
           echo "Server configuration verified for ${{ matrix.server }}"
-          
-          # 调试：检查环境变量是否存在（隐藏值）
-          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
-            echo "LOBE_CHAT_ENV is configured (length: ${#LOBE_CHAT_ENV} chars)"
-            # 显示前10个字符用于调试
-            echo "LOBE_CHAT_ENV starts with: ${LOBE_CHAT_ENV:0:10}..."
-          else
-            echo "WARNING: LOBE_CHAT_ENV is not configured"
-          fi
 
       - name: Deploy to ${{ matrix.server }}
         env:
@@ -312,22 +300,14 @@ jobs:
           
           echo "Deploying version ${VERSION_TAG} to ${SERVER_HOST}"
           
-          # 调试：显示环境变量传递状态
-          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
-            echo "Environment variables will be passed to deployment script"
-            echo "Total length: ${#LOBE_CHAT_ENV} characters"
-          else
-            echo "No environment variables to pass"
-          fi
-          
-          # 创建部署脚本
+          # 创建部署脚本 (已修复)
           cat > deploy.sh << 'EOF'
           #!/bin/bash
           set -e
           
           VERSION_TAG="${1}"
-          shift  # 移除第一个参数
-          LOBE_CHAT_ENV="$@"  # 剩余的所有参数作为环境变量
+          shift # 移除第一个参数
+          LOBE_CHAT_ENV="$@" # 剩余的所有参数作为环境变量
           
           echo "========================================="
           echo "Starting deployment of lobe-chat"
@@ -335,42 +315,39 @@ jobs:
           echo "Time: $(date)"
           echo "========================================="
           
-          # 调试：显示收到的环境变量
-          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
-              echo "Received environment variables (length: ${#LOBE_CHAT_ENV})"
-              # 显示前50个字符用于调试
-              echo "Environment starts with: ${LOBE_CHAT_ENV:0:50}..."
-          else
-              echo "No environment variables received"
-          fi
-          
           # 检测是否为 root 用户或具有 sudo 权限
           SUDO_CMD=""
           if [ "$EUID" -ne 0 ]; then
-              # 不是 root 用户，检查是否有 sudo 权限
-              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-                  SUDO_CMD="sudo"
-                  echo "Running with sudo privileges"
-              else
-                  echo "Running as non-root user without sudo"
-              fi
+            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              SUDO_CMD="sudo"
+              echo "Running with sudo privileges"
+            else
+              echo "Running as non-root user without sudo"
+            fi
           else
-              echo "Running as root user"
+            echo "Running as root user"
+          fi
+          
+          # [修复] 确保 ss 命令可用，用于后续端口检查
+          if ! command -v ss >/dev/null 2>&1; then
+            echo "Installing iproute2 for ss command..."
+            ${SUDO_CMD} apt-get update
+            ${SUDO_CMD} apt-get install -y iproute2
           fi
           
           # 检测系统架构
           ARCH=$(uname -m)
           case ${ARCH} in
-              x86_64)
-                  BINARY_ARCH="amd64"
-                  ;;
-              aarch64|arm64)
-                  BINARY_ARCH="arm64"
-                  ;;
-              *)
-                  echo "ERROR: Unsupported architecture: ${ARCH}"
-                  exit 1
-                  ;;
+            x86_64)
+              BINARY_ARCH="amd64"
+              ;;
+            aarch64|arm64)
+              BINARY_ARCH="arm64"
+              ;;
+            *)
+              echo "ERROR: Unsupported architecture: ${ARCH}"
+              exit 1
+              ;;
           esac
           
           echo "System architecture: ${ARCH} (binary: ${BINARY_ARCH})"
@@ -387,277 +364,122 @@ jobs:
           # 下载二进制文件（带重试机制）
           echo "Downloading binary file..."
           for i in {1..3}; do
-              if wget --progress=dot:giga -O lobe-chat.bin "${DOWNLOAD_URL}"; then
-                  echo "Download completed successfully"
-                  break
-              else
-                  echo "Download attempt $i failed"
-                  if [ $i -eq 3 ]; then
-                      echo "ERROR: Failed to download after 3 attempts"
-                      exit 1
-                  fi
-                  sleep 5
+            if wget --progress=dot:giga -O lobe-chat.bin "${DOWNLOAD_URL}"; then
+              echo "Download completed successfully"
+              break
+            else
+              echo "Download attempt $i failed"
+              if [ $i -eq 3 ]; then
+                echo "ERROR: Failed to download after 3 attempts"
+                exit 1
               fi
+              sleep 5
+            fi
           done
-          
-          # 验证下载的文件
-          if [ ! -f lobe-chat.bin ]; then
-              echo "ERROR: Downloaded file not found"
-              exit 1
-          fi
-          
-          FILE_SIZE=$(stat -c%s lobe-chat.bin)
-          echo "Downloaded file size: ${FILE_SIZE} bytes"
-          
-          if [ ${FILE_SIZE} -lt 1000000 ]; then
-              echo "ERROR: Downloaded file seems too small (${FILE_SIZE} bytes)"
-              exit 1
-          fi
           
           # 检查是否有运行中的 lobe-chat 进程
           echo "Checking for running lobe-chat process..."
           OLD_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
           
           if [ ! -z "${OLD_PIDS}" ]; then
-              echo "Found running process(es):"
-              echo "${OLD_PIDS}"
-              echo "Stopping old process(es)..."
-              
-              # 尝试优雅关闭所有进程
-              for PID in ${OLD_PIDS}; do
-                  echo "Stopping PID: ${PID}"
-                  kill ${PID} 2>/dev/null || true
-              done
-              
-              # 等待进程结束
-              sleep 3
-              
-              # 检查是否还有进程存活
-              REMAINING_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
-              if [ ! -z "${REMAINING_PIDS}" ]; then
-                  echo "Force killing remaining processes..."
-                  for PID in ${REMAINING_PIDS}; do
-                      kill -9 ${PID} 2>/dev/null || true
-                  done
-                  sleep 1
-              fi
-              
-              echo "All old processes stopped"
+            echo "Found running process(es): ${OLD_PIDS}"
+            echo "Stopping old process(es)..."
+            # 优雅关闭，然后强制关闭
+            kill ${OLD_PIDS} 2>/dev/null || true
+            sleep 3
+            kill -9 ${OLD_PIDS} 2>/dev/null || true
+            echo "All old processes stopped"
           else
-              echo "No running process found"
+            echo "No running process found"
           fi
           
-          # 创建目标目录（如果不存在）
-          if [ ! -d "/opt/lobe-chat" ]; then
-              echo "Creating directory /opt/lobe-chat"
-              ${SUDO_CMD} mkdir -p /opt/lobe-chat
-              
-              # 如果是非 root 用户，尝试更改所有权
-              if [ "$EUID" -ne 0 ] && [ ! -z "${SUDO_CMD}" ]; then
-                  ${SUDO_CMD} chown $(whoami):$(whoami) /opt/lobe-chat
-              fi
-          fi
-          
-          # 创建日志目录
+          # 创建目标目录
           ${SUDO_CMD} mkdir -p /opt/lobe-chat/logs
           
-          # 备份旧版本（如果存在）
+          # 备份旧版本
           if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
-              BACKUP_NAME="lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
-              echo "Backing up old version to ${BACKUP_NAME}"
-              ${SUDO_CMD} mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/${BACKUP_NAME}
-              
-              # 保留最近的3个备份
-              cd /opt/lobe-chat
-              ls -t lobe-chat.bin.backup.* 2>/dev/null | tail -n +4 | xargs -r ${SUDO_CMD} rm -f
-              cd ${TEMP_DIR}
+            BACKUP_NAME="lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
+            echo "Backing up old version to ${BACKUP_NAME}"
+            ${SUDO_CMD} mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/${BACKUP_NAME}
           fi
           
-          # 移动新版本到目标位置
+          # 移动新版本
           echo "Installing new version..."
           ${SUDO_CMD} mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
-          
-          # 设置执行权限
-          echo "Setting permissions..."
           ${SUDO_CMD} chmod +x /opt/lobe-chat/lobe-chat.bin
           
-          # 清理临时目录
+          # 清理
           cd /
           rm -rf ${TEMP_DIR}
           
-          # 准备日志文件
-          LOG_FILE="/opt/lobe-chat/lobe-chat.log"
-          ${SUDO_CMD} touch ${LOG_FILE}
-          ${SUDO_CMD} chmod 666 ${LOG_FILE}
-          
           # 构建启动命令
-          echo ""
           echo "Building startup command..."
-          
-          # 基础命令
           START_CMD="/opt/lobe-chat/lobe-chat.bin"
-          
-          # 处理环境变量
           if [ ! -z "${LOBE_CHAT_ENV}" ]; then
-              echo "Processing environment variables..."
-              
-              # 直接使用传入的环境变量字符串
-              # 如果已经包含 -e，直接使用；否则添加 -e
-              if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
-                  # 已经是正确格式
-                  START_CMD="${START_CMD} ${LOBE_CHAT_ENV}"
-                  echo "Using pre-formatted environment arguments"
-              else
-                  # 需要添加 -e 前缀
-                  # 将环境变量按空格分割，每个添加 -e
-                  ENV_ARGS=""
-                  for env_pair in ${LOBE_CHAT_ENV}; do
-                      if [ ! -z "$env_pair" ] && echo "$env_pair" | grep -q '='; then
-                          ENV_ARGS="${ENV_ARGS} -e ${env_pair}"
-                      fi
-                  done
-                  START_CMD="${START_CMD} ${ENV_ARGS}"
-                  echo "Added -e prefix to environment variables"
-              fi
-              
-              # 统计环境变量数量
-              ENV_COUNT=$(echo "${START_CMD}" | grep -o '\-e ' | wc -l)
-              echo "Configured ${ENV_COUNT} environment variable(s)"
-              
-              # 显示配置的环境变量名（隐藏值）
-              echo "Environment variables:"
-              echo "${START_CMD}" | tr ' ' '\n' | grep '^\-e ' | sed 's/-e /  - /' | sed 's/=.*/=***/'
-          else
-              echo "No environment variables configured"
+            if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
+              START_CMD="${START_CMD} ${LOBE_CHAT_ENV}"
+            else
+              ENV_ARGS=""
+              for env_pair in ${LOBE_CHAT_ENV}; do
+                if [ ! -z "$env_pair" ] && echo "$env_pair" | grep -q '='; then
+                  ENV_ARGS="${ENV_ARGS} -e ${env_pair}"
+                fi
+              done
+              START_CMD="${START_CMD} ${ENV_ARGS}"
+            fi
           fi
-          
-          # 显示最终命令（隐藏敏感信息）
-          echo ""
-          echo "Final command (values hidden):"
-          echo "${START_CMD}" | sed 's/=[-a-zA-Z0-9\/\.:_@]*/=***/g'
-          echo ""
-          
-          # 创建启动脚本（用于调试和重启）
-          START_SCRIPT="/opt/lobe-chat/start.sh"
-          ${SUDO_CMD} cat > ${START_SCRIPT} << SCRIPT_EOF
-          #!/bin/bash
-          # Auto-generated startup script
-          # Version: ${VERSION_TAG}
-          # Generated: $(date)
           
           LOG_FILE="/opt/lobe-chat/lobe-chat.log"
           
-          # 启动命令
-          ${START_CMD} > \${LOG_FILE} 2>&1 &
+          # [修复] 使用 nohup 替换 setsid 来启动服务
+          echo "Starting lobe-chat service using nohup..."
+          nohup ${START_CMD} > ${LOG_FILE} 2>&1 &
           
-          echo "Started lobe-chat with PID: \$!"
-          SCRIPT_EOF
+          # [修复] 增强健康检查，检查进程和端口
+          echo "Service starting, waiting for initialization... (up to 20s)"
+          SUCCESS=false
+          for i in {1..10}; do
+            # 检查进程是否存在 并且 端口 3210 是否在监听
+            if pgrep -f "/opt/lobe-chat/lobe-chat.bin" > /dev/null && ss -tlpn | grep -q ':3210'; then
+              echo "✅ Service is running and listening on port 3210."
+              SUCCESS=true
+              break
+            fi
+            echo "Waiting for service to be ready... ($i/10)"
+            sleep 2
+          done
           
-          ${SUDO_CMD} chmod +x ${START_SCRIPT}
-          echo "Startup script saved to ${START_SCRIPT}"
-          
-          # 启动服务
-          echo ""
-          echo "Starting lobe-chat service..."
-          
-          # 使用 setsid 创建新会话，避免终端问题
-          setsid ${START_CMD} > ${LOG_FILE} 2>&1 &
-          
-          echo "Service starting, waiting for initialization..."
-          sleep 8
-          
-          # 验证进程是否成功启动
-          NEW_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
-          if [ ! -z "${NEW_PIDS}" ]; then
-              # 检查进程是否真的在运行（再等待一下）
-              sleep 2
-              FINAL_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
-              
-              if [ ! -z "${FINAL_PIDS}" ]; then
-                  echo "========================================="
-                  echo "Deployment successful!"
-                  echo "Process PID(s): ${FINAL_PIDS}"
-                  echo "Version: ${VERSION_TAG}"
-                  echo "========================================="
-                  
-                  # 显示启动日志
-                  echo ""
-                  echo "Startup logs (last 40 lines):"
-                  echo "-----------------------------------------"
-                  tail -n 40 ${LOG_FILE} 2>/dev/null || true
-                  echo "-----------------------------------------"
-                  
-                  # 检查是否有错误信息
-                  if tail -n 40 ${LOG_FILE} 2>/dev/null | grep -qi "error\|panic\|failed\|abort"; then
-                      echo ""
-                      echo "⚠️  WARNING: Detected potential errors in logs"
-                      echo "Please verify the application is running correctly"
-                      
-                      # 特定错误检查
-                      if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
-                          echo "❌ Missing required environment variables"
-                      fi
-                      if grep -q "tcgetattr" ${LOG_FILE} 2>/dev/null; then
-                          echo "⚠️  Terminal-related warning (this can be ignored in background mode)"
-                      fi
-                      if grep -q "bind: address already in use" ${LOG_FILE} 2>/dev/null; then
-                          echo "❌ Port is already in use"
-                      fi
-                      
-                      # 即使有警告，如果进程还在运行，认为成功
-                      if [ ! -z "$(pgrep -f "/opt/lobe-chat/lobe-chat.bin")" ]; then
-                          echo ""
-                          echo "ℹ️  Process is still running despite warnings"
-                          exit 0
-                      else
-                          exit 1
-                      fi
-                  else
-                      echo ""
-                      echo "✅ No errors detected in startup logs"
-                  fi
-                  
-                  exit 0
-              else
-                  echo "ERROR: Process started but terminated quickly"
-              fi
+          # 根据最终检查结果判断成功或失败
+          if [ "${SUCCESS}" = "true" ]; then
+            FINAL_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin")
+            echo "========================================="
+            echo "Deployment successful!"
+            echo "Process PID(s): ${FINAL_PIDS}"
+            echo "Version: ${VERSION_TAG}"
+            echo "========================================="
+            echo ""
+            echo "Startup logs (last 20 lines):"
+            echo "-----------------------------------------"
+            tail -n 20 ${LOG_FILE} 2>/dev/null || true
+            echo "-----------------------------------------"
+            exit 0
+          else
+            echo "========================================="
+            echo "❌ ERROR: Deployment Failed"
+            echo "========================================="
+            echo "Service failed to start or listen on port 3210."
+            echo ""
+            echo "Error logs (last 50 lines):"
+            echo "-----------------------------------------"
+            tail -n 50 ${LOG_FILE} 2>/dev/null || true
+            echo "-----------------------------------------"
+            exit 1
           fi
-          
-          # 启动失败
-          echo "ERROR: Failed to start lobe-chat"
-          echo ""
-          echo "Error logs (last 50 lines):"
-          echo "-----------------------------------------"
-          tail -n 50 ${LOG_FILE} 2>/dev/null || true
-          echo "-----------------------------------------"
-          
-          # 分析错误原因
-          echo ""
-          echo "Error analysis:"
-          if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
-              echo "❌ Missing required environment variables"
-              echo "   Please check your LOBE_CHAT_ENV configuration"
-          fi
-          if grep -q "permission denied" ${LOG_FILE} 2>/dev/null; then
-              echo "❌ Permission denied error"
-              echo "   Check file permissions and user privileges"
-          fi
-          if grep -q "no such file or directory" ${LOG_FILE} 2>/dev/null; then
-              echo "❌ File not found error"
-              echo "   Check if all required files are present"
-          fi
-          if grep -q "tcgetattr" ${LOG_FILE} 2>/dev/null; then
-              echo "⚠️  Terminal issue detected"
-              echo "   Try running with different terminal settings"
-          fi
-          
-          exit 1
           EOF
-          
-          # 使用 sshpass 执行部署脚本，传递环境变量
+
+          # 使用 sshpass 执行部署脚本
           echo "::group::Executing deployment on ${SERVER_HOST}"
           
-          # 注意：这里将环境变量作为参数传递给脚本
           if sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
             "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"; then
             echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
@@ -678,38 +500,23 @@ jobs:
           VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
           SERVER_NAME: ${{ matrix.server }}
         run: |
-          # 只在配置了 Telegram 的情况下发送通知
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
             echo "Sending Telegram notification..."
-            
-            # 构建消息内容（使用 JSON 格式避免格式问题）
             MESSAGE=$(cat <<-END
-          {
-            "chat_id": "${TELEGRAM_CHAT_ID}",
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": true,
-            "text": "🚀 *Lobe Chat Deployment Success*\n\n📦 *Version:* \`${VERSION_TAG}\`\n🖥️ *Server:* ${SERVER_NAME}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n✅ *Status:* Deployed and running\n\n🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
-          }
-          END
-          )
+            {
+              "chat_id": "${TELEGRAM_CHAT_ID}",
+              "parse_mode": "Markdown",
+              "disable_web_page_preview": true,
+              "text": "🚀 *Lobe Chat Deployment Success*\n\n📦 *Version:* \`${VERSION_TAG}\`\n🖥️ *Server:* ${SERVER_NAME}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n✅ *Status:* Deployed and running\n\n🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
+            }
+            END
+            )
             
-            # 发送 Telegram 消息
-            RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
-              -d "${MESSAGE}")
-            
-            # 检查发送结果
-            if echo "$RESPONSE" | grep -q '"ok":true'; then
-              echo "✅ Telegram notification sent successfully"
-            else
-              echo "⚠️ Failed to send Telegram notification"
-              echo "Response: $RESPONSE"
-            fi
-          else
-            echo "Telegram credentials not configured, skipping notification"
+              -d "${MESSAGE}"
           fi
 
-  # 部署失败时的通知
   notify-failure:
     needs: [pack-binaries, deploy-to-server]
     if: |
@@ -723,7 +530,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
-            # 确定失败的阶段
             FAILED_STAGE=""
             if [ "${{ needs.pack-binaries.result }}" == "failure" ]; then
               FAILED_STAGE="Pack & Release"
@@ -733,19 +539,16 @@ jobs:
               FAILED_STAGE="Unknown"
             fi
             
-            # 构建消息内容
             MESSAGE=$(cat <<-END
-          {
-            "chat_id": "${TELEGRAM_CHAT_ID}",
-            "parse_mode": "Markdown",
-            "text": "❌ *Lobe Chat Pipeline Failed*\n\n⚠️ *Failed Stage:* ${FAILED_STAGE}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n📝 *Workflow:* ${{ github.workflow }}\n🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-          }
-          END
-          )
+            {
+              "chat_id": "${TELEGRAM_CHAT_ID}",
+              "parse_mode": "Markdown",
+              "text": "❌ *Lobe Chat Pipeline Failed*\n\n⚠️ *Failed Stage:* ${FAILED_STAGE}\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\n📝 *Workflow:* ${{ github.workflow }}\n🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            }
+            END
+            )
             
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "${MESSAGE}"
-              
-            echo "Failure notification sent"
           fi
