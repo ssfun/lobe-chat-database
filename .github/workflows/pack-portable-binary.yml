@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write # <-- 为 cleanup-runs 任务添加 actions:write 权限
 
 jobs:
   pack-and-release:
@@ -136,11 +137,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.pack-and-release.outputs.docker_tag }}
+          name: "Release ${{ needs.pack-and-release.outputs.docker_tag }}" # [OPTIMIZE] Changed 'title' to 'name'
           files: |
             lobe-chat-*.bin
             checksums.txt
           token: ${{ secrets.GITHUB_TOKEN }}
-          title: "Release ${{ needs.pack-and-release.outputs.docker_tag }}"
           body: |
             Automated Release for ${{ needs.pack-and-release.outputs.docker_tag }}
 
@@ -180,58 +181,39 @@ jobs:
           VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
         run: |
           sudo apt-get update && sudo apt-get install -y sshpass
-          
-          echo "Deploying version ${VERSION_TAG} to ${SERVER_HOST}"
-          
-          # [最终修复] 使用 screen 的最终部署脚本
           cat > deploy.sh << 'EOF'
           #!/bin/bash
           set -e
-          
           VERSION_TAG="${1}"
           shift
           LOBE_CHAT_ENV="$@"
-          
-          echo "========================================="
-          echo "Starting deployment using screen"
-          echo "Version: ${VERSION_TAG}"
-          echo "========================================="
-          
+          echo "--- Deployment using screen started for v${VERSION_TAG} ---"
           SUDO_CMD=""
           if [ "$EUID" -ne 0 ]; then
             if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
               SUDO_CMD="sudo"
             fi
           fi
-          
-          # 确保 screen 和 ss 已安装
           echo "Ensuring screen and iproute2 are installed..."
-          ${SUDO_CMD} apt-get update
-          ${SUDO_CMD} apt-get install -y screen iproute2
-          
-          # 停止旧的 lobe-chat 进程 (作为保险)
+          ${SUDO_CMD} apt-get update >/dev/null
+          ${SUDO_CMD} apt-get install -y screen iproute2 >/dev/null
           pkill -f "/opt/lobe-chat/lobe-chat.bin" || true
-          
-          # 停止旧的 screen 会话
           if screen -list | grep -q "lobe-chat"; then
             echo "Stopping old screen session..."
             screen -S lobe-chat -X quit || true
             sleep 2
           fi
-          
-          # 下载和安装二进制文件
           ARCH=$(uname -m)
           case ${ARCH} in
             x86_64) BINARY_ARCH="amd64" ;;
             aarch64|arm64) BINARY_ARCH="arm64" ;;
             *) echo "ERROR: Unsupported architecture: ${ARCH}"; exit 1 ;;
           esac
-          DOWNLOAD_URL="https://github.com/ssfun/lobe-chat-database/releases/download/${VERSION_TAG}/lobe-chat-${VERSION_TAG}-linux-${BINARY_ARCH}.bin"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION_TAG}/lobe-chat-${VERSION_TAG}-linux-${BINARY_ARCH}.bin"
           TEMP_DIR=$(mktemp -d)
           cd ${TEMP_DIR}
           echo "Downloading from ${DOWNLOAD_URL}..."
           wget -q --show-progress -O lobe-chat.bin "${DOWNLOAD_URL}"
-          
           ${SUDO_CMD} mkdir -p /opt/lobe-chat
           if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
             ${SUDO_CMD} mv /opt/lobe-chat/lobe-chat.bin "/opt/lobe-chat/lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
@@ -239,8 +221,6 @@ jobs:
           ${SUDO_CMD} mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
           ${SUDO_CMD} chmod +x /opt/lobe-chat/lobe-chat.bin
           cd / && rm -rf ${TEMP_DIR}
-          
-          # 构建启动命令
           START_CMD="/opt/lobe-chat/lobe-chat.bin"
           if [ ! -z "${LOBE_CHAT_ENV}" ]; then
             if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
@@ -255,14 +235,9 @@ jobs:
               START_CMD="${START_CMD} ${ENV_ARGS}"
             fi
           fi
-          
           LOG_FILE="/opt/lobe-chat/lobe-chat.log"
-          
-          # 使用 screen 在后台启动服务
           echo "Starting service inside a new screen session 'lobe-chat'..."
           screen -dmS lobe-chat bash -c "${START_CMD} > ${LOG_FILE} 2>&1"
-          
-          # 健康检查
           echo "Waiting for service to be ready... (up to 20s)"
           SUCCESS=false
           for i in {1..10}; do
@@ -274,27 +249,20 @@ jobs:
             echo "Waiting... ($i/10)"
             sleep 2
           done
-          
           if [ "${SUCCESS}" = "true" ]; then
-            echo "Deployment successful!"
+            echo "✅ Deployment successful!"
             exit 0
           else
             echo "❌ ERROR: Deployment Failed"
-            echo "Service failed to start or listen on port 3210."
-            echo "Error logs (last 50 lines from ${LOG_FILE}):"
             tail -n 50 ${LOG_FILE} 2>/dev/null || echo "Log file not found or empty."
             exit 1
           fi
           EOF
-
-          # 使用原始 ssh 命令 (不带 -tt)
           if sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
             "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"; then
             echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
-            echo "::notice ::✅ Deployment to ${SERVER_HOST} completed successfully"
           else
             echo "DEPLOYMENT_SUCCESS=false" >> $GITHUB_ENV
-            echo "::error ::❌ Deployment to ${SERVER_HOST} failed"
             exit 1
           fi
 
@@ -307,22 +275,13 @@ jobs:
           SERVER_NAME: ${{ matrix.server }}
         run: |
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
-            echo "Sending success notification to Telegram..."
-            
-            # 1. Prepare the multi-line text content. Newlines MUST be escaped as \\n for valid JSON.
-            TEXT_CONTENT="🚀 *Lobe Chat Deployment Success*\\n\\n📦 *Version:* \`${VERSION_TAG}\`\\n🖥️ *Server:* ${SERVER_NAME}\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n✅ *Status:* Deployed and running\\n\\n🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
-
-            # 2. Use printf to safely build the JSON payload. This is much more robust than a heredoc.
+            TEXT_CONTENT="🚀 *Lobe Chat Deployment Success*\\n\\n📦 *Version:* \`${VERSION_TAG}\`\\n🖥️ *Server:* ${SERVER_NAME}\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n✅ *Status:* Deployed and running\\n\\n🔗 [View Release](https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG})"
             JSON_PAYLOAD=$(printf '{"chat_id": "%s", "parse_mode": "Markdown", "disable_web_page_preview": true, "text": "%s"}' \
               "${TELEGRAM_CHAT_ID}" \
               "${TEXT_CONTENT}")
-
-            # 3. Send the notification via curl.
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "${JSON_PAYLOAD}"
-          else
-            echo "Telegram credentials not configured, skipping success notification."
           fi
 
   notify-failure:
@@ -338,27 +297,30 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
-            echo "Sending failure notification to Telegram..."
-            
             FAILED_STAGE="Unknown"
             if [ "${{ needs.pack-binaries.result }}" == "failure" ]; then
               FAILED_STAGE="Pack & Release"
             elif [ "${{ needs.deploy-to-server.result }}" == "failure" ]; then
               FAILED_STAGE="Deployment"
             fi
-            
-            # Prepare text content with escaped newlines
             TEXT_CONTENT="❌ *Lobe Chat Pipeline Failed*\\n\\n⚠️ *Failed Stage:* ${FAILED_STAGE}\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n📝 *Workflow:* ${{ github.workflow }}\\n🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-
-            # Build the JSON payload safely
             JSON_PAYLOAD=$(printf '{"chat_id": "%s", "parse_mode": "Markdown", "disable_web_page_preview": true, "text": "%s"}' \
               "${TELEGRAM_CHAT_ID}" \
               "${TEXT_CONTENT}")
-              
-            # Send the notification
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "${JSON_PAYLOAD}"
-          else
-            echo "Telegram credentials not configured, skipping failure notification."
           fi
+          
+  cleanup-runs:
+    runs-on: ubuntu-latest
+    needs: [deploy-to-server, notify-failure] # [NEW] Depends on final jobs
+    if: always() # [NEW] Always runs
+    steps:
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GH_TOKEN }} # [OPTIMIZE] Use standard token
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 6
