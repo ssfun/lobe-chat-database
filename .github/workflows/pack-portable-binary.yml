@@ -26,8 +26,8 @@ jobs:
           # 获取所有标签，过滤掉 latest 和非版本标签
           echo "Fetching Docker Hub tags..."
           
-          # 获取前10个标签（通常足够找到最新版本）
-          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=10')
+          # 获取前100个标签（通常足够找到最新版本）
+          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=100')
           
           # 提取所有标签名，过滤出版本号格式的标签（v开头或纯数字版本）
           # 排除 latest, nightly, dev 等非版本标签
@@ -143,7 +143,7 @@ jobs:
     if: needs.pack-and-release.outputs.should_pack == 'true'
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.create_release.outputs.release_created }}
+      release_created: ${{ steps.set_output.outputs.release_created }}
       version_tag: ${{ needs.pack-and-release.outputs.docker_tag }}
 
     steps:
@@ -198,7 +198,7 @@ jobs:
             ### 📦 Version Information
             - **Docker image version:** `${{ needs.pack-and-release.outputs.docker_tag }}`
             - **Previous GitHub release:** `${{ needs.pack-and-release.outputs.github_tag }}`
-            - **Release date:** `${{ github.event.head_commit.timestamp }}`
+            - **Release date:** `$(date -u '+%Y-%m-%d %H:%M:%S UTC')`
             
             ### 📥 Downloads
             This release contains portable binary executables packed from the official Docker image.
@@ -229,20 +229,51 @@ jobs:
             ---
             *This release was automatically generated from the Docker Hub image.*
       
-      - name: Set release created output
-        run: echo "release_created=true" >> $GITHUB_OUTPUT
+      # 关键修复：正确设置输出
+      - name: Set output for deployment trigger
+        id: set_output
+        run: |
+          echo "release_created=true" >> $GITHUB_OUTPUT
+          echo "Release created successfully, deployment will be triggered"
 
   deploy-to-server:
     needs: [pack-binaries]
+    # 修复：使用正确的条件判断
     if: needs.pack-binaries.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false  # 允许某个服务器失败时继续部署其他服务器
       matrix:
         server: [server1]  # 可以扩展为多个服务器 [server1, server2, server3]
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      
+      # 添加调试信息
+      - name: Debug deployment trigger
+        run: |
+          echo "Release created: ${{ needs.pack-binaries.outputs.release_created }}"
+          echo "Version tag: ${{ needs.pack-binaries.outputs.version_tag }}"
+          echo "Starting deployment to ${{ matrix.server }}"
+
+      - name: Check required secrets
+        env:
+          SERVER_HOST: ${{ secrets[format('{0}_HOST', matrix.server)] }}
+          SERVER_USER: ${{ secrets[format('{0}_USER', matrix.server)] }}
+        run: |
+          # 检查必需的环境变量
+          if [ -z "${SERVER_HOST}" ]; then
+            echo "ERROR: ${matrix.server}_HOST secret is not configured"
+            exit 1
+          fi
+          
+          if [ -z "${SERVER_USER}" ]; then
+            echo "ERROR: ${matrix.server}_USER secret is not configured"
+            exit 1
+          fi
+          
+          echo "Server configuration verified for ${{ matrix.server }}"
 
       - name: Deploy to ${{ matrix.server }}
         env:
@@ -256,6 +287,8 @@ jobs:
           # 安装 sshpass 用于密码登录
           sudo apt-get update && sudo apt-get install -y sshpass
           
+          echo "Deploying version ${VERSION_TAG} to ${SERVER_HOST}"
+          
           # 创建部署脚本
           cat > deploy.sh << 'EOF'
           #!/bin/bash
@@ -264,7 +297,11 @@ jobs:
           VERSION_TAG="${1}"
           LOBE_CHAT_ENV="${2}"
           
-          echo "Starting deployment of lobe-chat version: ${VERSION_TAG}"
+          echo "=========================================="
+          echo "Starting deployment of lobe-chat"
+          echo "Version: ${VERSION_TAG}"
+          echo "Time: $(date)"
+          echo "=========================================="
           
           # 检测系统架构
           ARCH=$(uname -m)
@@ -276,114 +313,155 @@ jobs:
                   BINARY_ARCH="arm64"
                   ;;
               *)
-                  echo "Unsupported architecture: ${ARCH}"
+                  echo "ERROR: Unsupported architecture: ${ARCH}"
                   exit 1
                   ;;
           esac
           
-          echo "Detected architecture: ${ARCH} (${BINARY_ARCH})"
+          echo "System info:"
+          echo "  OS: $(uname -s)"
+          echo "  Architecture: ${ARCH} (${BINARY_ARCH})"
+          echo "  Hostname: $(hostname)"
           
           # 下载对应架构的二进制文件
           DOWNLOAD_URL="https://github.com/ssfun/lobe-chat-database/releases/download/${VERSION_TAG}/lobe-chat-${VERSION_TAG}-linux-${BINARY_ARCH}.bin"
-          echo "Downloading from: ${DOWNLOAD_URL}"
+          echo ""
+          echo "Download URL: ${DOWNLOAD_URL}"
           
           # 创建临时目录
           TEMP_DIR=$(mktemp -d)
+          echo "Working directory: ${TEMP_DIR}"
           cd ${TEMP_DIR}
           
-          # 下载二进制文件
-          if ! wget -O lobe-chat.bin "${DOWNLOAD_URL}"; then
-              echo "Failed to download binary"
+          # 下载二进制文件（带进度显示）
+          echo ""
+          echo "Downloading binary file..."
+          if ! wget --progress=bar:force -O lobe-chat.bin "${DOWNLOAD_URL}"; then
+              echo "ERROR: Failed to download binary"
+              rm -rf ${TEMP_DIR}
               exit 1
           fi
           
-          echo "Download completed successfully"
+          # 验证文件大小
+          FILE_SIZE=$(stat -c%s lobe-chat.bin)
+          echo "Downloaded file size: ${FILE_SIZE} bytes"
+          
+          if [ ${FILE_SIZE} -lt 1000000 ]; then
+              echo "WARNING: File size seems too small, might be corrupted"
+          fi
           
           # 检查是否有运行中的 lobe-chat 进程
-          OLD_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          echo ""
+          echo "Checking for running processes..."
+          OLD_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
           
-          if [ ! -z "${OLD_PID}" ]; then
-              echo "Found running lobe-chat process (PID: ${OLD_PID}), stopping it..."
-              kill ${OLD_PID} || true
+          if [ ! -z "${OLD_PIDS}" ]; then
+              echo "Found running lobe-chat process(es): ${OLD_PIDS}"
+              echo "Stopping old process(es)..."
+              for pid in ${OLD_PIDS}; do
+                  kill ${pid} || true
+              done
               sleep 3
               # 强制终止如果还在运行
-              kill -9 ${OLD_PID} 2>/dev/null || true
-              echo "Old process stopped"
+              for pid in ${OLD_PIDS}; do
+                  kill -9 ${pid} 2>/dev/null || true
+              done
+              echo "Old process(es) stopped"
           else
               echo "No running lobe-chat process found"
           fi
           
           # 创建目标目录（如果不存在）
           if [ ! -d "/opt/lobe-chat" ]; then
+              echo ""
               echo "Creating directory /opt/lobe-chat"
               sudo mkdir -p /opt/lobe-chat
+              sudo chown $(whoami):$(whoami) /opt/lobe-chat || true
           fi
           
           # 备份旧版本（如果存在）
           if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
-              echo "Backing up old version"
-              sudo mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)
+              BACKUP_NAME="/opt/lobe-chat/lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
+              echo ""
+              echo "Backing up old version to ${BACKUP_NAME}"
+              sudo mv /opt/lobe-chat/lobe-chat.bin ${BACKUP_NAME}
+              
+              # 只保留最新的3个备份
+              echo "Cleaning old backups..."
+              ls -t /opt/lobe-chat/lobe-chat.bin.backup.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
           fi
           
           # 移动新版本到目标位置
-          echo "Installing new version"
+          echo ""
+          echo "Installing new version..."
           sudo mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
           
           # 设置执行权限
-          echo "Setting execute permissions"
+          echo "Setting execute permissions..."
           sudo chmod +x /opt/lobe-chat/lobe-chat.bin
           
           # 清理临时目录
           cd /
           rm -rf ${TEMP_DIR}
           
+          # 创建或清理日志文件
+          sudo touch /opt/lobe-chat/lobe-chat.log
+          sudo chmod 666 /opt/lobe-chat/lobe-chat.log || true
+          
           # 启动新版本
-          echo "Starting lobe-chat with environment variables..."
+          echo ""
+          echo "Starting lobe-chat..."
           if [ -z "${LOBE_CHAT_ENV}" ]; then
-              echo "No environment variables provided"
+              echo "Starting without additional parameters"
               nohup /opt/lobe-chat/lobe-chat.bin > /opt/lobe-chat/lobe-chat.log 2>&1 &
           else
-              echo "Starting with environment: ${LOBE_CHAT_ENV}"
+              echo "Starting with parameters: ${LOBE_CHAT_ENV}"
               nohup /opt/lobe-chat/lobe-chat.bin ${LOBE_CHAT_ENV} > /opt/lobe-chat/lobe-chat.log 2>&1 &
           fi
           
-          # 等待进程启动
+          echo "Process started, waiting for initialization..."
           sleep 5
           
           # 验证进程是否成功启动
-          NEW_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
-          if [ ! -z "${NEW_PID}" ]; then
-              echo "lobe-chat started successfully (PID: ${NEW_PID})"
-              echo "Version ${VERSION_TAG} deployed successfully"
-              # 输出最后几行日志
-              echo "Recent logs:"
-              tail -n 20 /opt/lobe-chat/lobe-chat.log || true
+          echo ""
+          echo "Verifying deployment..."
+          NEW_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          if [ ! -z "${NEW_PIDS}" ]; then
+              echo "✅ lobe-chat started successfully"
+              echo "Process ID(s): ${NEW_PIDS}"
+              echo ""
+              echo "=========================================="
+              echo "Deployment completed successfully!"
+              echo "Version ${VERSION_TAG} is now running"
+              echo "=========================================="
+              echo ""
+              echo "Recent logs (last 20 lines):"
+              echo "------------------------------------------"
+              tail -n 20 /opt/lobe-chat/lobe-chat.log 2>/dev/null || echo "No logs available yet"
               exit 0
           else
-              echo "Failed to start lobe-chat"
-              echo "Error logs:"
-              tail -n 50 /opt/lobe-chat/lobe-chat.log || true
+              echo "❌ Failed to start lobe-chat"
+              echo ""
+              echo "Error logs (last 50 lines):"
+              echo "------------------------------------------"
+              tail -n 50 /opt/lobe-chat/lobe-chat.log 2>/dev/null || echo "No logs available"
               exit 1
           fi
           EOF
           
           # 使用 sshpass 执行部署脚本
-          echo "Connecting to server ${SERVER_HOST}:${SERVER_PORT}"
+          echo "Connecting to ${SERVER_HOST}:${SERVER_PORT} as ${SERVER_USER}"
           
-          # 上传并执行部署脚本
-          sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
-            "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"
-          
-          DEPLOY_STATUS=$?
-          
-          # 保存部署状态
-          if [ ${DEPLOY_STATUS} -eq 0 ]; then
-              echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
-              echo "Deployment to ${matrix.server} completed successfully"
+          # 执行部署
+          if sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+            -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
+            "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"; then
+            echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
+            echo "✅ Deployment to ${matrix.server} completed successfully"
           else
-              echo "DEPLOYMENT_SUCCESS=false" >> $GITHUB_ENV
-              echo "Deployment to ${matrix.server} failed"
-              exit 1
+            echo "DEPLOYMENT_SUCCESS=false" >> $GITHUB_ENV
+            echo "❌ Deployment to ${matrix.server} failed"
+            exit 1
           fi
 
       - name: Send Telegram notification
@@ -399,12 +477,12 @@ jobs:
             # 构建消息内容
             MESSAGE="🚀 *Lobe Chat Deployment Success*
             
-            📦 *Version:* \`${VERSION_TAG}\`
-            🖥️ *Server:* ${SERVER_NAME}
-            ⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            ✅ *Status:* Deployed and running
-            
-            🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
+📦 *Version:* \`${VERSION_TAG}\`
+🖥️ *Server:* ${SERVER_NAME}
+⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+✅ *Status:* Deployed and running
+
+🔗 [View Release](https://github.com/ssfun/lobe-chat-database/releases/tag/${VERSION_TAG})"
             
             # 发送 Telegram 消息
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -414,36 +492,39 @@ jobs:
                 \"text\": \"${MESSAGE}\",
                 \"parse_mode\": \"Markdown\",
                 \"disable_web_page_preview\": true
-              }"
+              }" > /dev/null
             
-            echo "Telegram notification sent"
+            echo "Telegram notification sent successfully"
           else
             echo "Telegram credentials not configured, skipping notification"
           fi
 
-  # 可选：部署失败时的通知
+  # 部署失败时的通知
   notify-failure:
-    needs: [deploy-to-server]
-    if: failure()
+    needs: [pack-binaries, deploy-to-server]
+    if: failure() && needs.pack-binaries.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Send failure notification
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
         run: |
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
             MESSAGE="❌ *Lobe Chat Deployment Failed*
             
-            ⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-            📝 *Workflow:* ${{ github.workflow }}
-            🔗 [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+📦 *Version:* \`${VERSION_TAG}\`
+⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+📝 *Workflow:* ${{ github.workflow }}
+🔗 [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -H "Content-Type: application/json" \
               -d "{
                 \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
                 \"text\": \"${MESSAGE}\",
-                \"parse_mode\": \"Markdown\"
-              }"
+                \"parse_mode\": \"Markdown\",
+                \"disable_web_page_preview\": true
+              }" > /dev/null
           fi
