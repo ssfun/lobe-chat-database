@@ -316,6 +316,20 @@ jobs:
           echo "Time: $(date)"
           echo "========================================="
           
+          # 检测是否为 root 用户或具有 sudo 权限
+          SUDO_CMD=""
+          if [ "$EUID" -ne 0 ]; then
+              # 不是 root 用户，检查是否有 sudo 权限
+              if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+                  SUDO_CMD="sudo"
+                  echo "Running with sudo privileges"
+              else
+                  echo "Running as non-root user without sudo"
+              fi
+          else
+              echo "Running as root user"
+          fi
+          
           # 检测系统架构
           ARCH=$(uname -m)
           case ${ARCH} in
@@ -374,25 +388,33 @@ jobs:
           
           # 检查是否有运行中的 lobe-chat 进程
           echo "Checking for running lobe-chat process..."
-          OLD_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          OLD_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
           
-          if [ ! -z "${OLD_PID}" ]; then
-              echo "Found running process (PID: ${OLD_PID})"
-              echo "Stopping old process..."
-              kill ${OLD_PID} || true
+          if [ ! -z "${OLD_PIDS}" ]; then
+              echo "Found running process(es):"
+              echo "${OLD_PIDS}"
+              echo "Stopping old process(es)..."
+              
+              # 尝试优雅关闭所有进程
+              for PID in ${OLD_PIDS}; do
+                  echo "Stopping PID: ${PID}"
+                  kill ${PID} 2>/dev/null || true
+              done
               
               # 等待进程结束
-              for i in {1..10}; do
-                  if ! kill -0 ${OLD_PID} 2>/dev/null; then
-                      echo "Process stopped successfully"
-                      break
-                  fi
-                  if [ $i -eq 10 ]; then
-                      echo "Force killing process..."
-                      kill -9 ${OLD_PID} 2>/dev/null || true
-                  fi
+              sleep 3
+              
+              # 检查是否还有进程存活
+              REMAINING_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+              if [ ! -z "${REMAINING_PIDS}" ]; then
+                  echo "Force killing remaining processes..."
+                  for PID in ${REMAINING_PIDS}; do
+                      kill -9 ${PID} 2>/dev/null || true
+                  done
                   sleep 1
-              done
+              fi
+              
+              echo "All old processes stopped"
           else
               echo "No running process found"
           fi
@@ -400,32 +422,36 @@ jobs:
           # 创建目标目录（如果不存在）
           if [ ! -d "/opt/lobe-chat" ]; then
               echo "Creating directory /opt/lobe-chat"
-              sudo mkdir -p /opt/lobe-chat
-              sudo chown $(whoami):$(whoami) /opt/lobe-chat
+              ${SUDO_CMD} mkdir -p /opt/lobe-chat
+              
+              # 如果是非 root 用户，尝试更改所有权
+              if [ "$EUID" -ne 0 ] && [ ! -z "${SUDO_CMD}" ]; then
+                  ${SUDO_CMD} chown $(whoami):$(whoami) /opt/lobe-chat
+              fi
           fi
           
           # 创建日志目录
-          sudo mkdir -p /opt/lobe-chat/logs
+          ${SUDO_CMD} mkdir -p /opt/lobe-chat/logs
           
           # 备份旧版本（如果存在）
           if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
               BACKUP_NAME="lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
               echo "Backing up old version to ${BACKUP_NAME}"
-              sudo mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/${BACKUP_NAME}
+              ${SUDO_CMD} mv /opt/lobe-chat/lobe-chat.bin /opt/lobe-chat/${BACKUP_NAME}
               
               # 保留最近的3个备份
               cd /opt/lobe-chat
-              ls -t lobe-chat.bin.backup.* 2>/dev/null | tail -n +4 | xargs -r sudo rm
-              cd -
+              ls -t lobe-chat.bin.backup.* 2>/dev/null | tail -n +4 | xargs -r ${SUDO_CMD} rm -f
+              cd ${TEMP_DIR}
           fi
           
           # 移动新版本到目标位置
           echo "Installing new version..."
-          sudo mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
+          ${SUDO_CMD} mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
           
           # 设置执行权限
           echo "Setting permissions..."
-          sudo chmod +x /opt/lobe-chat/lobe-chat.bin
+          ${SUDO_CMD} chmod +x /opt/lobe-chat/lobe-chat.bin
           
           # 清理临时目录
           cd /
@@ -433,37 +459,121 @@ jobs:
           
           # 准备日志文件
           LOG_FILE="/opt/lobe-chat/lobe-chat.log"
-          sudo touch ${LOG_FILE}
-          sudo chmod 666 ${LOG_FILE}
+          ${SUDO_CMD} touch ${LOG_FILE}
+          ${SUDO_CMD} chmod 666 ${LOG_FILE}
           
-          # 启动新版本
-          echo "Starting lobe-chat service..."
-          if [ -z "${LOBE_CHAT_ENV}" ]; then
-              echo "Starting without additional parameters"
-              nohup /opt/lobe-chat/lobe-chat.bin > ${LOG_FILE} 2>&1 &
+          # 构建启动命令
+          echo "Building startup command..."
+          
+          # 基础命令
+          START_CMD="/opt/lobe-chat/lobe-chat.bin"
+          
+          # 解析并添加环境变量参数
+          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
+              echo "Processing environment variables..."
+              
+              # 将环境变量转换为 -e KEY=VALUE 格式
+              # 支持多种输入格式：
+              # 1. KEY1=value1 KEY2=value2
+              # 2. KEY1=value1\nKEY2=value2
+              # 3. -e KEY1=value1 -e KEY2=value2 (直接使用)
+              
+              # 检查是否已经包含 -e 参数
+              if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
+                  # 已经是正确格式，直接使用
+                  ENV_ARGS="${LOBE_CHAT_ENV}"
+                  echo "Using pre-formatted environment arguments"
+              else
+                  # 需要转换格式
+                  ENV_ARGS=""
+                  
+                  # 将换行符替换为空格，然后分割处理
+                  NORMALIZED_ENV=$(echo "${LOBE_CHAT_ENV}" | tr '\n' ' ')
+                  
+                  # 使用 while 循环处理每个环境变量
+                  echo "${NORMALIZED_ENV}" | tr ' ' '\n' | while IFS= read -r line; do
+                      # 跳过空行
+                      [ -z "$line" ] && continue
+                      
+                      # 验证格式（必须包含=）
+                      if echo "$line" | grep -q '='; then
+                          # 如果不是以 -e 开头，添加 -e
+                          if ! echo "$line" | grep -q '^\-e '; then
+                              line="-e $line"
+                          fi
+                          ENV_ARGS="${ENV_ARGS} ${line}"
+                      fi
+                  done
+                  
+                  # 另一种方法：使用数组处理
+                  ENV_ARGS=""
+                  IFS=' ' read -ra ENV_ARRAY <<< "${NORMALIZED_ENV}"
+                  for env_var in "${ENV_ARRAY[@]}"; do
+                      if [ ! -z "$env_var" ] && echo "$env_var" | grep -q '='; then
+                          ENV_ARGS="${ENV_ARGS} -e ${env_var}"
+                      fi
+                  done
+              fi
+              
+              # 构建完整命令
+              START_CMD="${START_CMD} ${ENV_ARGS}"
+              
+              # 显示环境变量数量（隐藏敏感值）
+              ENV_COUNT=$(echo "${ENV_ARGS}" | grep -o '\-e ' | wc -l)
+              echo "Configured ${ENV_COUNT} environment variable(s)"
+              
+              # 显示配置的环境变量名（不显示值）
+              echo "Environment variables:"
+              echo "${ENV_ARGS}" | tr ' ' '\n' | grep '^\-e ' | sed 's/-e /  - /' | sed 's/=.*/=***/'
           else
-              echo "Starting with parameters: ${LOBE_CHAT_ENV}"
-              nohup /opt/lobe-chat/lobe-chat.bin ${LOBE_CHAT_ENV} > ${LOG_FILE} 2>&1 &
+              echo "No environment variables configured"
           fi
+          
+          # 启动服务
+          echo ""
+          echo "Starting lobe-chat service..."
+          echo "Command: nohup ${START_CMD} > ${LOG_FILE} 2>&1 &"
+          echo ""
+          
+          # 执行启动命令
+          eval "nohup ${START_CMD} > ${LOG_FILE} 2>&1 &"
           
           echo "Waiting for service to start..."
           sleep 5
           
           # 验证进程是否成功启动
-          NEW_PID=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
-          if [ ! -z "${NEW_PID}" ]; then
+          NEW_PIDS=$(pgrep -f "/opt/lobe-chat/lobe-chat.bin" || true)
+          if [ ! -z "${NEW_PIDS}" ]; then
               echo "========================================="
               echo "Deployment successful!"
-              echo "Process PID: ${NEW_PID}"
+              echo "Process PID(s): ${NEW_PIDS}"
               echo "Version: ${VERSION_TAG}"
               echo "========================================="
               
               # 显示启动日志
               echo ""
-              echo "Startup logs (last 20 lines):"
+              echo "Startup logs (last 30 lines):"
               echo "-----------------------------------------"
-              tail -n 20 ${LOG_FILE} || true
+              tail -n 30 ${LOG_FILE} 2>/dev/null || true
               echo "-----------------------------------------"
+              
+              # 检查是否有错误信息
+              if tail -n 30 ${LOG_FILE} 2>/dev/null | grep -qi "error\|panic\|failed"; then
+                  echo ""
+                  echo "⚠️  WARNING: Detected potential errors in logs"
+                  echo "Please verify the application is running correctly"
+                  
+                  # 特定错误检查
+                  if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
+                      echo "❌ Missing required environment variables"
+                  fi
+                  if grep -q "bind: address already in use" ${LOG_FILE} 2>/dev/null; then
+                      echo "❌ Port is already in use"
+                  fi
+              else
+                  echo ""
+                  echo "✅ No errors detected in startup logs"
+              fi
               
               exit 0
           else
@@ -471,8 +581,25 @@ jobs:
               echo ""
               echo "Error logs (last 50 lines):"
               echo "-----------------------------------------"
-              tail -n 50 ${LOG_FILE} || true
+              tail -n 50 ${LOG_FILE} 2>/dev/null || true
               echo "-----------------------------------------"
+              
+              # 分析错误原因
+              echo ""
+              echo "Error analysis:"
+              if grep -q "expected environment variable" ${LOG_FILE} 2>/dev/null; then
+                  echo "❌ Missing required environment variables"
+                  echo "   Please check your LOBE_CHAT_ENV configuration"
+              fi
+              if grep -q "permission denied" ${LOG_FILE} 2>/dev/null; then
+                  echo "❌ Permission denied error"
+                  echo "   Check file permissions and user privileges"
+              fi
+              if grep -q "no such file or directory" ${LOG_FILE} 2>/dev/null; then
+                  echo "❌ File not found error"
+                  echo "   Check if all required files are present"
+              fi
+              
               exit 1
           fi
           EOF
