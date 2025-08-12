@@ -1,4 +1,4 @@
-name: Pack & Release & Deploy Portable Binary
+name: Pack & Release & Update Dockerfile
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  actions: write # <-- 为 cleanup-runs 任务添加 actions:write 权限
+  actions: write
 
 jobs:
   pack-and-release:
@@ -137,7 +137,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.pack-and-release.outputs.docker_tag }}
-          name: "Release ${{ needs.pack-and-release.outputs.docker_tag }}" # [OPTIMIZE] Changed 'title' to 'name'
+          name: "Release ${{ needs.pack-and-release.outputs.docker_tag }}"
           files: |
             lobe-chat-*.bin
             checksums.txt
@@ -155,127 +155,94 @@ jobs:
             echo "release_created=false" >> $GITHUB_OUTPUT
           fi
 
-  deploy-to-server:
+  update-dockerfile:
     needs: [pack-binaries]
     if: |
       always() && 
       needs.pack-binaries.result == 'success' && 
       needs.pack-binaries.outputs.release_created == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        server: [server1]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Deploy to ${{ matrix.server }}
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Update Dockerfile version
         env:
-          SERVER_HOST: ${{ secrets[format('{0}_HOST', matrix.server)] }}
-          SERVER_USER: ${{ secrets[format('{0}_USER', matrix.server)] }}
-          SERVER_PASSWORD: ${{ secrets[format('{0}_PASSWORD', matrix.server)] }}
-          SERVER_PORT: ${{ secrets[format('{0}_PORT', matrix.server)] || '22' }}
-          LOBE_CHAT_ENV: ${{ secrets[format('{0}_LOBE_CHAT_ENV', matrix.server)] || '' }}
           VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
         run: |
-          sudo apt-get update && sudo apt-get install -y sshpass
-          cat > deploy.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          VERSION_TAG="${1}"
-          shift
-          LOBE_CHAT_ENV="$@"
-          echo "--- Deployment using screen started for v${VERSION_TAG} ---"
-          SUDO_CMD=""
-          if [ "$EUID" -ne 0 ]; then
-            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-              SUDO_CMD="sudo"
-            fi
+          echo "Updating Dockerfile with version: ${VERSION_TAG}"
+          
+          # 检查 Dockerfile 是否存在
+          if [ ! -f "Dockerfile" ]; then
+            echo "ERROR: Dockerfile not found in repository root"
+            exit 1
           fi
-          echo "Ensuring screen and iproute2 are installed..."
-          ${SUDO_CMD} apt-get update >/dev/null
-          ${SUDO_CMD} apt-get install -y screen iproute2 >/dev/null
-          pkill -f "/opt/lobe-chat/lobe-chat.bin" || true
-          if screen -list | grep -q "lobe-chat"; then
-            echo "Stopping old screen session..."
-            screen -S lobe-chat -X quit || true
-            sleep 2
+          
+          # 备份原始 Dockerfile
+          cp Dockerfile Dockerfile.backup
+          
+          # 更新 Dockerfile 中的版本号
+          # 支持带或不带 'v' 前缀的版本号
+          sed -i "s|FROM lobehub/lobe-chat-database:.*|FROM lobehub/lobe-chat-database:${VERSION_TAG}|g" Dockerfile
+          
+          # 验证更新是否成功
+          if grep -q "FROM lobehub/lobe-chat-database:${VERSION_TAG}" Dockerfile; then
+            echo "✅ Dockerfile updated successfully"
+            echo "New content:"
+            cat Dockerfile
+          else
+            echo "❌ Failed to update Dockerfile"
+            mv Dockerfile.backup Dockerfile
+            exit 1
           fi
-          ARCH=$(uname -m)
-          case ${ARCH} in
-            x86_64) BINARY_ARCH="amd64" ;;
-            aarch64|arm64) BINARY_ARCH="arm64" ;;
-            *) echo "ERROR: Unsupported architecture: ${ARCH}"; exit 1 ;;
-          esac
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${VERSION_TAG}/lobe-chat-${VERSION_TAG}-linux-${BINARY_ARCH}.bin"
-          TEMP_DIR=$(mktemp -d)
-          cd ${TEMP_DIR}
-          echo "Downloading from ${DOWNLOAD_URL}..."
-          wget -q --show-progress -O lobe-chat.bin "${DOWNLOAD_URL}"
-          ${SUDO_CMD} mkdir -p /opt/lobe-chat
-          if [ -f "/opt/lobe-chat/lobe-chat.bin" ]; then
-            ${SUDO_CMD} mv /opt/lobe-chat/lobe-chat.bin "/opt/lobe-chat/lobe-chat.bin.backup.$(date +%Y%m%d_%H%M%S)"
-          fi
-          ${SUDO_CMD} mv lobe-chat.bin /opt/lobe-chat/lobe-chat.bin
-          ${SUDO_CMD} chmod +x /opt/lobe-chat/lobe-chat.bin
-          cd / && rm -rf ${TEMP_DIR}
-          START_CMD="/opt/lobe-chat/lobe-chat.bin"
-          if [ ! -z "${LOBE_CHAT_ENV}" ]; then
-            if echo "${LOBE_CHAT_ENV}" | grep -q "^\-e "; then
-              START_CMD="${START_CMD} ${LOBE_CHAT_ENV}"
-            else
-              ENV_ARGS=""
-              for env_pair in ${LOBE_CHAT_ENV}; do
-                if [ ! -z "$env_pair" ] && echo "$env_pair" | grep -q '='; then
-                  ENV_ARGS="${ENV_ARGS} -e ${env_pair}"
-                fi
-              done
-              START_CMD="${START_CMD} ${ENV_ARGS}"
-            fi
-          fi
-          LOG_FILE="/opt/lobe-chat/lobe-chat.log"
-          echo "Starting service inside a new screen session 'lobe-chat'..."
-          screen -dmS lobe-chat bash -c "${START_CMD} > ${LOG_FILE} 2>&1"
-          echo "Waiting for service to be ready... (up to 20s)"
-          SUCCESS=false
-          for i in {1..10}; do
-            if pgrep -f "/opt/lobe-chat/lobe-chat.bin" > /dev/null && ss -tlpn | grep -q ':3210'; then
-              echo "✅ Service is running and listening on port 3210."
-              SUCCESS=true
-              break
-            fi
-            echo "Waiting... ($i/10)"
-            sleep 2
-          done
-          if [ "${SUCCESS}" = "true" ]; then
-            echo "✅ Deployment successful!"
+          
+          # 删除备份文件
+          rm -f Dockerfile.backup
+
+      - name: Commit and push changes
+        env:
+          VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
+        run: |
+          # 配置 Git
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # 检查是否有更改
+          if git diff --quiet Dockerfile; then
+            echo "No changes detected in Dockerfile"
             exit 0
-          else
-            echo "❌ ERROR: Deployment Failed"
-            tail -n 50 ${LOG_FILE} 2>/dev/null || echo "Log file not found or empty."
-            exit 1
           fi
-          EOF
-          if sshpass -p "${SERVER_PASSWORD}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_HOST} \
-            "bash -s" < deploy.sh "${VERSION_TAG}" "${LOBE_CHAT_ENV}"; then
-            echo "DEPLOYMENT_SUCCESS=true" >> $GITHUB_ENV
-          else
-            echo "DEPLOYMENT_SUCCESS=false" >> $GITHUB_ENV
-            exit 1
-          fi
+          
+          # 添加更改
+          git add Dockerfile
+          
+          # 提交更改
+          COMMIT_MESSAGE="chore: update Dockerfile to version ${VERSION_TAG}
+
+          Automated update by GitHub Actions workflow.
+          - Updated lobehub/lobe-chat-database image to ${VERSION_TAG}
+          - Release: https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG}"
+          
+          git commit -m "${COMMIT_MESSAGE}"
+          
+          # 推送更改
+          git push origin HEAD:${{ github.ref }}
+          
+          echo "✅ Changes committed and pushed successfully"
 
       - name: Send Telegram notification
-        if: env.DEPLOYMENT_SUCCESS == 'true'
+        if: success()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           VERSION_TAG: ${{ needs.pack-binaries.outputs.version_tag }}
-          SERVER_NAME: ${{ matrix.server }}
         run: |
           if [ ! -z "${TELEGRAM_BOT_TOKEN}" ] && [ ! -z "${TELEGRAM_CHAT_ID}" ]; then
-            TEXT_CONTENT="🚀 *Lobe Chat Deployment Success*\\n\\n📦 *Version:* \`${VERSION_TAG}\`\\n🖥️ *Server:* ${SERVER_NAME}\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n✅ *Status:* Deployed and running\\n\\n🔗 [View Release](https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG})"
+            TEXT_CONTENT="🚀 *Lobe Chat Update Success*\\n\\n📦 *Version:* \`${VERSION_TAG}\`\\n📝 *Action:* Dockerfile updated\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n✅ *Status:* Successfully updated and committed\\n\\n🔗 [View Release](https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG})\\n📄 [View Commit](https://github.com/${{ github.repository }}/commit/HEAD)"
             JSON_PAYLOAD=$(printf '{"chat_id": "%s", "parse_mode": "Markdown", "disable_web_page_preview": true, "text": "%s"}' \
               "${TELEGRAM_CHAT_ID}" \
               "${TEXT_CONTENT}")
@@ -285,10 +252,10 @@ jobs:
           fi
 
   notify-failure:
-    needs: [pack-binaries, deploy-to-server]
+    needs: [pack-binaries, update-dockerfile]
     if: |
       always() && 
-      (needs.pack-binaries.result == 'failure' || needs.deploy-to-server.result == 'failure')
+      (needs.pack-binaries.result == 'failure' || needs.update-dockerfile.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - name: Send failure notification
@@ -300,8 +267,8 @@ jobs:
             FAILED_STAGE="Unknown"
             if [ "${{ needs.pack-binaries.result }}" == "failure" ]; then
               FAILED_STAGE="Pack & Release"
-            elif [ "${{ needs.deploy-to-server.result }}" == "failure" ]; then
-              FAILED_STAGE="Deployment"
+            elif [ "${{ needs.update-dockerfile.result }}" == "failure" ]; then
+              FAILED_STAGE="Dockerfile Update"
             fi
             TEXT_CONTENT="❌ *Lobe Chat Pipeline Failed*\\n\\n⚠️ *Failed Stage:* ${FAILED_STAGE}\\n⏰ *Time:* $(date -u '+%Y-%m-%d %H:%M:%S UTC')\\n📝 *Workflow:* ${{ github.workflow }}\\n🔗 [View Details](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             JSON_PAYLOAD=$(printf '{"chat_id": "%s", "parse_mode": "Markdown", "disable_web_page_preview": true, "text": "%s"}' \
@@ -314,13 +281,13 @@ jobs:
           
   cleanup-runs:
     runs-on: ubuntu-latest
-    needs: [deploy-to-server, notify-failure] # [NEW] Depends on final jobs
-    if: always() # [NEW] Always runs
+    needs: [update-dockerfile, notify-failure]
+    if: always()
     steps:
       - name: Delete old workflow runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
-          token: ${{ secrets.GH_TOKEN }} # [OPTIMIZE] Use standard token
+          token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           retain_days: 7
           keep_minimum_runs: 6
