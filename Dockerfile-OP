@@ -2,4 +2,8 @@
 
 FROM ghcr.io/open-webui/open-webui:main
 
+RUN chmod 777 -R /app/backend
+
 USER 10014
+
+
