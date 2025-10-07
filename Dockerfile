@@ -1,3 +1,3 @@
-FROM lobehub/lobe-chat-database:1.134.6
+FROM lobehub/lobe-chat-database:1.135.2
 
 USER 10014
