@@ -1,3 +1,3 @@
-FROM lobehub/lobehub:2.0.0-next.166
+FROM lobehub/lobehub:2.0.0-next.167
 
 USER 10014
