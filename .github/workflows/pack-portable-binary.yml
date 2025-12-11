@@ -21,11 +21,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get latest lobehub/lobe-chat-database docker tag
+      - name: Get latest lobehub/lobehub docker tag
         id: get_docker_tag
         run: |
           echo "Fetching Docker Hub tags..."
-          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobe-chat-database/tags?page_size=100')
+          TAGS_JSON=$(curl -s 'https://registry.hub.docker.com/v2/repositories/lobehub/lobehub/tags?page_size=100')
           LATEST_VERSION=$(echo "$TAGS_JSON" | jq -r '.results[].name' | \
             grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.\-]+)?$' | \
             grep -v -E '^(latest|nightly|dev|alpha|beta|rc)$' | \
@@ -118,13 +118,13 @@ jobs:
 
       - name: Pack linux/amd64
         run: |
-          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+          ./dockerc --image docker://lobehub/lobehub:${{ needs.pack-and-release.outputs.docker_tag }} \
             --arch amd64 \
             --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-amd64.bin
 
       - name: Pack linux/arm64
         run: |
-          ./dockerc --image docker://lobehub/lobe-chat-database:${{ needs.pack-and-release.outputs.docker_tag }} \
+          ./dockerc --image docker://lobehub/lobehub:${{ needs.pack-and-release.outputs.docker_tag }} \
             --arch arm64 \
             --output lobe-chat-${{ needs.pack-and-release.outputs.docker_tag }}-linux-arm64.bin
 
@@ -187,10 +187,10 @@ jobs:
           
           # 更新 Dockerfile 中的版本号
           # 支持带或不带 'v' 前缀的版本号
-          sed -i "s|FROM lobehub/lobe-chat-database:.*|FROM lobehub/lobe-chat-database:${VERSION_TAG}|g" Dockerfile
+          sed -i "s|FROM lobehub/lobehub:.*|FROM lobehub/lobehub:${VERSION_TAG}|g" Dockerfile
           
           # 验证更新是否成功
-          if grep -q "FROM lobehub/lobe-chat-database:${VERSION_TAG}" Dockerfile; then
+          if grep -q "FROM lobehub/lobehub:${VERSION_TAG}" Dockerfile; then
             echo "✅ Dockerfile updated successfully"
             echo "New content:"
             cat Dockerfile
@@ -224,7 +224,7 @@ jobs:
           COMMIT_MESSAGE="chore: update Dockerfile to version ${VERSION_TAG}
 
           Automated update by GitHub Actions workflow.
-          - Updated lobehub/lobe-chat-database image to ${VERSION_TAG}
+          - Updated lobehub/lobehub image to ${VERSION_TAG}
           - Release: https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG}"
           
           git commit -m "${COMMIT_MESSAGE}"
