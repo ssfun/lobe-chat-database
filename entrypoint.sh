@@ -4,7 +4,7 @@
 # 环境变量配置与默认值
 # ==============================
 KOMARI_SECRET=${KOMARI_SECRET:-""}
-KOMARI_AGENT_UUID=${KOMARI_AGENT_UUID:-""}
+KOMARI_SERVER=${KOMARI_SERVER:-""}
 
 # ==============================
 # 1. 启动 komari-agent
