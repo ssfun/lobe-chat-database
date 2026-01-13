@@ -12,7 +12,7 @@ KOMARI_SERVER=${KOMARI_SERVER:-""}
 mkdir -p /tmp/next-cache/fetch-cache
 mkdir -p /tmp/next-cache/images
 mkdir -p /tmp/next-cache/webpack
-echo "[Init] Created writable cache directories in /tmp/next-cache"
+echo "[Init] 在 /tmp/next-cache 中创建可写缓存目录"
 
 # ==============================
 # 2. 启动 komari-agent
