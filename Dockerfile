@@ -29,8 +29,11 @@ ENV NODE_ENV="production" \
     PORT="3210"
 
 # 5. 补全缺失的原生模块
-WORKDIR /app
-RUN npm install --no-save @napi-rs/canvas --legacy-peer-deps
+RUN mkdir -p /tmp/canvas-build && \
+    cd /tmp/canvas-build && \
+    npm install @napi-rs/canvas && \
+    cp -r node_modules/* /app/node_modules/ && \
+    rm -rf /tmp/canvas-build
 
 # 6. 修复目录结构和权限
 RUN mkdir -p /app/.next/cache && \
@@ -43,7 +46,8 @@ RUN chmod +x /app/entrypoint.sh && \
     chmod +x /app/komari-agent && \
     chown -R 10014:10014 /app
 
-# 8. 切换用户启动
+WORKDIR /app
+
 USER 10014
 
 EXPOSE 3210
