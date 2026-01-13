@@ -11,38 +11,38 @@ KOMARI_SERVER=${KOMARI_SERVER:-""}
 # ==============================
 echo "[Init] Initializing runtime environment..."
 
-# 1. 强制清理并重建目标目录 (防止残留坏数据)
+# 1. 清理环境
 rm -rf /tmp/next
 mkdir -p /tmp/next
 
-# 2. 使用 tar 进行精确复制 (比 cp 更稳健)
-# 将 .next_source 的内容解压到 /tmp/next
+# 2. 复制构建产物 (移花接木)
+# 使用 tar 管道复制，保留所有属性
 echo "[Init] Copying build assets to /tmp/next..."
 cd /app/.next_source && tar cf - . | (cd /tmp/next && tar xf -)
 
-# 3. 强制创建缓存目录
+# 3. 【关键修复】链接 node_modules
+# 解决 "Cannot find module" 错误，让 /tmp 里的代码能找到 /app 下的依赖
+echo "[Init] Linking node_modules..."
+ln -s /app/node_modules /tmp/next/node_modules
+
+# 4. 创建缓存目录
 mkdir -p /tmp/next/cache
 
 # ==============================
-# 🔍 启动前自检 (Self-Check)
+# 🔍 启动前自检
 # ==============================
-if [ -f "/app/.next/BUILD_ID" ]; then
-    echo "[Check] ✅ Build ID found: $(cat /app/.next/BUILD_ID)"
+if [ -f "/tmp/next/BUILD_ID" ]; then
+    echo "[Check] ✅ Build assets ready in /tmp/next"
 else
-    echo "[Check] ❌ FATAL: BUILD_ID not found in /app/.next!"
-    echo "[Debug] Content of /app/.next (symlink target):"
-    ls -la /app/.next/ || echo "Cannot list /app/.next"
-    echo "[Debug] Content of /tmp/next:"
-    ls -la /tmp/next/ || echo "Cannot list /tmp/next"
-    # 如果检测失败，不要强行启动，否则只会报 generic error
-    echo "[Check] Trying to start anyway, but expect failure..."
+    echo "[Check] ❌ FATAL: Build assets failed to copy!"
+    ls -la /tmp/next
 fi
 
 # 返回 app 目录
 cd /app
 
 # ==============================
-# 1. 启动 komari-agent
+# 1. 启动 Komari Agent
 # ==============================
 KOMARI_SECRET=${KOMARI_SECRET:-""}
 if [ -n "$KOMARI_SERVER" ] && [ -n "$KOMARI_SECRET" ]; then
