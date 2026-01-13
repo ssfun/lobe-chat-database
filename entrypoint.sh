@@ -7,7 +7,15 @@ KOMARI_SECRET=${KOMARI_SECRET:-""}
 KOMARI_SERVER=${KOMARI_SERVER:-""}
 
 # ==============================
-# 1. 启动 komari-agent
+# 1. 初始化缓存目录 (适配只读文件系统)
+# ==============================
+mkdir -p /tmp/next-cache/fetch-cache
+mkdir -p /tmp/next-cache/images
+mkdir -p /tmp/next-cache/webpack
+echo "[Init] Created writable cache directories in /tmp/next-cache"
+
+# ==============================
+# 2. 启动 komari-agent
 # ==============================
 if [ -n "$KOMARI_SERVER" ] && [ -n "$KOMARI_SECRET" ]; then
     echo "[Komari] 启动监控..."
@@ -18,7 +26,7 @@ else
 fi
 
 # ==============================
-# 2. 启动主应用
+# 3. 启动主应用
 # ==============================
 echo "[LobeHub] 启动服务 (Port: $PORT)..."
 
