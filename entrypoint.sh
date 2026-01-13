@@ -9,10 +9,18 @@ KOMARI_SERVER=${KOMARI_SERVER:-""}
 # ==============================
 # 1. 初始化缓存目录 (适配只读文件系统)
 # ==============================
-mkdir -p /tmp/next-cache/fetch-cache
-mkdir -p /tmp/next-cache/images
-mkdir -p /tmp/next-cache/webpack
-echo "[Init] 在 /tmp/next-cache 中创建可写缓存目录"
+echo "[Init] Preparing writable .next directory in /tmp..."
+
+# A. 确保目标目录存在
+mkdir -p /tmp/next
+
+# B. 将构建产物从备份目录复制到 /tmp (如果 /tmp 为空)
+if [ ! -d "/tmp/next/server" ]; then
+    cp -a /app/.next_source/. /tmp/next/
+    echo "[Init] Assets copied to /tmp/next"
+else
+    echo "[Init] /tmp/next already exists, skipping copy"
+fi
 
 # ==============================
 # 2. 启动 komari-agent
