@@ -19,7 +19,7 @@ RUN apt-get update && \
 RUN ln -sf /usr/local/bin/node /bin/node
 
 # 3. 复制应用文件
-COPY --from=lobehub/lobehub:2.0.0-next.272 /app /app
+COPY --from=lobehub/lobehub /app /app
 COPY --from=ghcr.io/komari-monitor/komari-agent:latest /app/komari-agent /app/komari-agent
 
 # 4. 补全环境变量
@@ -28,20 +28,21 @@ ENV NODE_ENV="production" \
     HOSTNAME="0.0.0.0" \
     PORT="3210"
 
-# 5. 补全缺失的原生模块
+# 5. 补全 Canvas
 RUN mkdir -p /tmp/canvas-build && \
     cd /tmp/canvas-build && \
     npm install @napi-rs/canvas && \
     cp -r node_modules/* /app/node_modules/ && \
     rm -rf /tmp/canvas-build
 
-# 6. 修复目录结构和权限
-RUN mkdir -p /app/.next/cache && \
-    chmod 755 /app/.next/cache
+RUN mkdir -p /app/.next/cache/fetch-cache \
+    /app/.next/cache/images \
+    /app/.next/cache/webpack \
+    && chmod -R 755 /app/.next/cache
 
 COPY entrypoint.sh /app/entrypoint.sh
 
-# 7. 最终权限修正
+# 6. 最终权限修正
 RUN chmod +x /app/entrypoint.sh && \
     chmod +x /app/komari-agent && \
     chown -R 10014:10014 /app
