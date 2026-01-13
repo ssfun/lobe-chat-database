@@ -19,7 +19,7 @@ RUN apt-get update && \
 RUN ln -sf /usr/local/bin/node /bin/node
 
 # 3. 复制应用文件
-COPY --from=lobehub/lobehub:2.0.0-next.272 /app /app
+COPY --from=lobehub/lobehub /app /app
 COPY --from=ghcr.io/komari-monitor/komari-agent:latest /app/komari-agent /app/komari-agent
 
 # 4. 补全环境变量
@@ -30,7 +30,7 @@ ENV NODE_ENV="production" \
 
 # 5. 补全缺失的原生模块
 WORKDIR /app
-RUN npm install --no-save @napi-rs/canvas
+RUN npm install --no-save @napi-rs/canvas --legacy-peer-deps
 
 # 6. 修复目录结构和权限
 RUN mkdir -p /app/.next/cache && \
