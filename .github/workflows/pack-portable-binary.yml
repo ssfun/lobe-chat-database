@@ -185,17 +185,19 @@ jobs:
           # 备份原始 Dockerfile
           cp Dockerfile Dockerfile.backup
           
-          # 更新 Dockerfile 中的版本号
-          # 支持带或不带 'v' 前缀的版本号
-          sed -i "s|FROM lobehub/lobehub:.*|FROM lobehub/lobehub:${VERSION_TAG}|g" Dockerfile
+          # 1. 更新 COPY 指令中的版本号
+          # 匹配以 "COPY --from=lobehub/lobehub" 开头的行，并替换为带版本号的新行
+          sed -i "s|^COPY --from=lobehub/lobehub.*|COPY --from=lobehub/lobehub:${VERSION_TAG} /app /app|g" Dockerfile
           
-          # 验证更新是否成功
-          if grep -q "FROM lobehub/lobehub:${VERSION_TAG}" Dockerfile; then
+          # 2. 检查 COPY 指令是否包含新版本号
+          if grep -q "COPY --from=lobehub/lobehub:${VERSION_TAG}" Dockerfile; then
             echo "✅ Dockerfile updated successfully"
-            echo "New content:"
-            cat Dockerfile
+            echo "New content (partial):"
+            grep "COPY --from=lobehub/lobehub" Dockerfile
           else
             echo "❌ Failed to update Dockerfile"
+            echo "Debug: Current file content:"
+            cat Dockerfile
             mv Dockerfile.backup Dockerfile
             exit 1
           fi
@@ -224,7 +226,7 @@ jobs:
           COMMIT_MESSAGE="chore: update Dockerfile to version ${VERSION_TAG}
 
           Automated update by GitHub Actions workflow.
-          - Updated lobehub/lobehub image to ${VERSION_TAG}
+          - Updated lobehub/lobehub source image to ${VERSION_TAG}
           - Release: https://github.com/${{ github.repository }}/releases/tag/${VERSION_TAG}"
           
           git commit -m "${COMMIT_MESSAGE}"
