@@ -19,7 +19,7 @@ RUN apt-get update && \
 RUN ln -sf /usr/local/bin/node /bin/node
 
 # 3. 复制应用文件
-COPY --from=lobehub/lobehub:2.0.0-next.302 /app /app
+COPY --from=lobehub/lobehub:2.0.0-next.310 /app /app
 COPY --from=ghcr.io/komari-monitor/komari-agent:latest /app/komari-agent /app/komari-agent
 
 # 4. 环境变量
